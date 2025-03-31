@@ -265,3 +265,44 @@ stack :: proc(t: ^testing.T) {
     ret(&cpu, mem[:])
     testing.expect_value(t, cpu.pc, 0x1010)
 }
+ @(test)
+ exec_instructions :: proc(t: ^testing.T) {
+     cpu := CPU{}
+     mem: [0xFFFF]u8
+
+     cpu_init(&cpu)
+
+     // write 0x01 instruction in memory
+     mem[cpu.pc] = 0x01
+     mem[cpu.pc + 1] = 0x10
+     mem[cpu.pc + 2] = 0x42
+     // write 0x03 instruction in memory
+     mem[cpu.pc + 3] = 0x03
+
+     cpu_tick(&cpu, mem[:])
+
+     testing.expect_value(t, cpu.exec_cyles, 11)
+     testing.expect_value(t, cpu.bc, 0x4210)
+
+     // 0x03 instruction should only be executed after the 12 cyles of instruction 0x01 are done
+
+     for i := 0; i < 5; i += 1 {
+        cpu_tick(&cpu, mem[:])
+     }
+
+     testing.expect_value(t, cpu.exec_cyles, 6)
+     testing.expect_value(t, cpu.bc, 0x4210)
+
+     for i := 0; i < 6; i += 1 {
+         cpu_tick(&cpu, mem[:])
+     }
+
+     // 0x01 is done at this point, 0x03 should be executed next tick
+     testing.expect_value(t, cpu.exec_cyles, 0)
+     testing.expect_value(t, cpu.bc, 0x4210)
+
+     cpu_tick(&cpu, mem[:])
+
+     testing.expect_value(t, cpu.exec_cyles, 7)
+     testing.expect_value(t, cpu.bc, 0x4211) // incremented
+ }

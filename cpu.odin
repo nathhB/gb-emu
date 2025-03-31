@@ -11,7 +11,8 @@ CPU :: struct {
     hl: u16,
     sp: u16,
     pc: u16,
-    instructions: []Instruction,
+    instructions: [0xFF]Instruction,
+    exec_cyles: int
 }
 
 Instruction :: struct {
@@ -21,15 +22,22 @@ Instruction :: struct {
 }
 
 cpu_init :: proc(cpu: ^CPU) {
-    cpu.instructions = {
-        Instruction{1, 2, NOP_0x00}
-    }
+    cpu.instructions[0x00] = Instruction{1, 4, NOP_0x00}
+    cpu.instructions[0x01] = Instruction{3, 12, LD_0x01}
+    cpu.instructions[0x02] = Instruction{1, 8, LD_0x02}
+    cpu.instructions[0x03] = Instruction{1, 8, INC_0x03}
 
     cpu.pc = 0x100
     cpu.sp = 0xFFFE
 }
 
-cpu_tick :: proc(cpu: ^CPU, mem: []u8) -> int {
+cpu_tick :: proc(cpu: ^CPU, mem: []u8) {
+    if cpu.exec_cyles > 0 {
+        cpu.exec_cyles -= 1
+
+        return
+    }
+
     op := mem[cpu.pc]
     instruction := cpu.instructions[op]
 
@@ -45,8 +53,7 @@ cpu_tick :: proc(cpu: ^CPU, mem: []u8) -> int {
     }
 
     instruction.func(cpu, mem, data)
-
-    return instruction.cycles
+    cpu.exec_cyles = instruction.cycles - 1
 }
 
 fetch :: proc(cpu: ^CPU, mem: []u8, len: int) -> u16 {
@@ -55,7 +62,7 @@ fetch :: proc(cpu: ^CPU, mem: []u8, len: int) -> u16 {
     data := u16(mem[cpu.pc])
 
     if len == 2 {
-        data |= u16(mem[cpu.pc + 1] << 8)
+        data |= (u16(mem[cpu.pc + 1]) << 8)
     }
 
     return data
