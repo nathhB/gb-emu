@@ -171,13 +171,13 @@ rlca :: proc(t: ^testing.T) {
     write_register_high(&cpu.af, 0x80)
     RLCA_0x07(&cpu, mem[:], 0)
 
-    testing.expect_value(t, u8(0), read_register_high(cpu.af))
+    testing.expect_value(t, u8(1), read_register_high(cpu.af))
     testing.expect(t, read_flag(&cpu, Flags.C))
 
     write_register_high(&cpu.af, 0x2A)
     RLCA_0x07(&cpu, mem[:], 0)
 
-    testing.expect_value(t, u8(0x2A << 1), read_register_high(cpu.af))
+    testing.expect_value(t, u8(0x2A * 2), read_register_high(cpu.af))
     testing.expect(t, !read_flag(&cpu, Flags.C))
 }
 
@@ -186,17 +186,17 @@ rrca :: proc(t: ^testing.T) {
     cpu := CPU{}
     mem: [0xFFFF]u8
 
-    write_register_high(&cpu.af, 0x80)
+    write_register_high(&cpu.af, 0x43)
     RRCA_0x0f(&cpu, mem[:], 0)
 
-    testing.expect_value(t, u8(0x80 >> 1), read_register_high(cpu.af))
-    testing.expect(t, !read_flag(&cpu, Flags.C))
-
-    write_register_high(&cpu.af, 0x2B)
-    RRCA_0x0f(&cpu, mem[:], 0)
-
-    testing.expect_value(t, u8(0x2B >> 1), read_register_high(cpu.af))
+    testing.expect_value(t, u8(0xA1), read_register_high(cpu.af))
     testing.expect(t, read_flag(&cpu, Flags.C))
+
+    write_register_high(&cpu.af, 0x42)
+    RRCA_0x0f(&cpu, mem[:], 0)
+
+    testing.expect_value(t, u8(0x21), read_register_high(cpu.af))
+    testing.expect(t, !read_flag(&cpu, Flags.C))
 }
 
 @(test)
@@ -230,6 +230,20 @@ rra :: proc(t: ^testing.T) {
 
     testing.expect_value(t, u8(0x4A), read_register_high(cpu.af))
     testing.expect(t, read_flag(&cpu, Flags.C))
+}
+
+@(test)
+swap_bytes :: proc(t: ^testing.T) {
+    cpu := CPU{}
+    v: u8 = 0x42
+
+    swap(&cpu, &v)
+
+    testing.expect_value(t, v, u8(0x24))
+    testing.expect(t, !read_flag(&cpu, Flags.Z))
+    testing.expect(t, !read_flag(&cpu, Flags.N))
+    testing.expect(t, !read_flag(&cpu, Flags.H))
+    testing.expect(t, !read_flag(&cpu, Flags.C))
 }
 
 @(test)

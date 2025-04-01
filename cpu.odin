@@ -12,7 +12,9 @@ CPU :: struct {
     sp: u16,
     pc: u16,
     instructions: [0xFF]Instruction,
-    exec_cyles: int
+    prefixed_instructions: [0xFF]Instruction,
+    exec_cyles: int,
+    prefix: bool
 }
 
 Instruction :: struct {
@@ -22,10 +24,14 @@ Instruction :: struct {
 }
 
 cpu_init :: proc(cpu: ^CPU) {
+    // unprefixed
     cpu.instructions[0x00] = Instruction{1, 4, NOP_0x00}
     cpu.instructions[0x01] = Instruction{3, 12, LD_0x01}
     cpu.instructions[0x02] = Instruction{1, 8, LD_0x02}
     cpu.instructions[0x03] = Instruction{1, 8, INC_0x03}
+
+    // prefixed
+    cpu.prefixed_instructions[0x00] = Instruction{}
 
     cpu.pc = 0x100
     cpu.sp = 0xFFFE
@@ -39,9 +45,11 @@ cpu_tick :: proc(cpu: ^CPU, mem: []u8) {
     }
 
     op := mem[cpu.pc]
-    instruction := cpu.instructions[op]
+    instructions := cpu.prefix ? cpu.prefixed_instructions[:] : cpu.instructions[:]
+    instruction := instructions[op]
 
     cpu.pc += 1
+    cpu.prefix = false
 
     data: u16 = 0
     len := instruction.len - 1
@@ -346,6 +354,76 @@ ret :: proc(cpu: ^CPU, mem: []u8) {
     pop_register(cpu, mem, &cpu.pc)
 }
 
+rlc :: proc(cpu: ^CPU, byte: ^u8) {
+    c := byte^ & 0x80 > 0
+    byte^ = (byte^ << 1) | u8(c)
+
+    write_flag(cpu, Flags.Z, byte^ == 0)
+    write_flag(cpu, Flags.N, false)
+    write_flag(cpu, Flags.H, false)
+    write_flag(cpu, Flags.C, c)
+}
+
+rrc :: proc(cpu: ^CPU, byte: ^u8) {
+    c := byte^ & 1 > 0
+    byte^ = (byte^ >> 1) | (u8(c) << 7)
+
+    write_flag(cpu, Flags.Z, byte^ == 0)
+    write_flag(cpu, Flags.N, false)
+    write_flag(cpu, Flags.H, false)
+    write_flag(cpu, Flags.C, c)
+}
+
+rl :: proc(cpu: ^CPU, byte: ^u8) {
+    c := byte^ & 0x80 > 0
+    byte^ = (byte^ << 1) | u8(read_flag(cpu, Flags.C))
+
+    write_flag(cpu, Flags.Z, byte^ == 0)
+    write_flag(cpu, Flags.N, false)
+    write_flag(cpu, Flags.H, false)
+    write_flag(cpu, Flags.C, c)
+}
+
+rr :: proc(cpu: ^CPU, byte: ^u8) {
+    c := byte^ & 1 > 0
+
+    byte^ = (byte^ >> 1) | (u8(read_flag(cpu, Flags.C)) << 7)
+
+    write_flag(cpu, Flags.Z, byte^ == 0)
+    write_flag(cpu, Flags.N, false)
+    write_flag(cpu, Flags.H, false)
+    write_flag(cpu, Flags.C, c)
+}
+
+sla :: proc(cpu: ^CPU, byte: ^u8) {
+    c := byte^ & 0x80 > 0
+    byte^ <<= 1
+
+    write_flag(cpu, Flags.Z, byte^ == 0)
+    write_flag(cpu, Flags.N, false)
+    write_flag(cpu, Flags.H, false)
+    write_flag(cpu, Flags.C, c)
+}
+
+sra :: proc(cpu: ^CPU, byte: ^u8) {
+    c := byte^ & 1 > 0
+    byte^ >>= 1
+
+    write_flag(cpu, Flags.Z, byte^ == 0)
+    write_flag(cpu, Flags.N, false)
+    write_flag(cpu, Flags.H, false)
+    write_flag(cpu, Flags.C, c)
+}
+
+swap :: proc(cpu: ^CPU, byte: ^u8) {
+    byte^ = (byte^ << 4) | ((byte^ & 0xF0) >> 4)
+
+    write_flag(cpu, Flags.Z, byte^ == 0)
+    write_flag(cpu, Flags.N, false)
+    write_flag(cpu, Flags.H, false)
+    write_flag(cpu, Flags.C, false)
+}
+
 // UNPREFIXED INSTRUCTIONS
 
 // GROUP: control/misc
@@ -366,6 +444,7 @@ NOP_0x00 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
     Flags: - - - -
 */
 STOP_0x10 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+    // TODO
 }
 
 /*
@@ -375,6 +454,7 @@ STOP_0x10 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
     Flags: - - - -
 */
 HALT_0x76 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+    // TODO
 }
 
 /*
@@ -384,6 +464,7 @@ HALT_0x76 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
     Flags: - - - -
 */
 PREFIX_0xcb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+    cpu.prefix = true
 }
 
 /*
@@ -393,6 +474,7 @@ PREFIX_0xcb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
     Flags: - - - -
 */
 DI_0xf3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+    // TODO
 }
 
 /*
@@ -402,6 +484,7 @@ DI_0xf3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
     Flags: - - - -
 */
 EI_0xfb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+    // TODO
 }
 
 // GROUP: x16/lsm
@@ -2495,9 +2578,7 @@ RLCA_0x07 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
     acc := read_register_high(cpu.af)
     c := acc & 0x80 > 0
 
-    acc <<= 1
-
-    write_register_high(&cpu.af, acc)
+    write_register_high(&cpu.af, (acc << 1) | u8(c))
 
     write_flag(cpu, Flags.Z, false)
     write_flag(cpu, Flags.N, false)
@@ -2515,9 +2596,7 @@ RRCA_0x0f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
     acc := read_register_high(cpu.af)
     c := acc & 1 > 0
 
-    acc >>= 1
-
-    write_register_high(&cpu.af, acc)
+    write_register_high(&cpu.af, (acc >> 1) | (u8(c) << 7))
 
     write_flag(cpu, Flags.Z, false)
     write_flag(cpu, Flags.N, false)
@@ -2534,9 +2613,7 @@ RRCA_0x0f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
 RLA_0x17 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
     acc := read_register_high(cpu.af)
     c := acc & 0x80 > 0
-
-    acc <<= 1
-    acc |= u8(read_flag(cpu, Flags.C))
+    acc = (acc << 1) | u8(read_flag(cpu, Flags.C))
 
     write_register_high(&cpu.af, acc)
 
@@ -2555,9 +2632,7 @@ RLA_0x17 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
 RRA_0x1f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
     acc := read_register_high(cpu.af)
     c := acc & 1 > 0
-
-    acc >>= 1
-    acc |= (u8(read_flag(cpu, Flags.C)) << 7)
+    acc = (acc >> 1) | (u8(read_flag(cpu, Flags.C)) << 7)
 
     write_register_high(&cpu.af, acc)
 
@@ -2902,3 +2977,6 @@ RST_0xff :: proc(cpu: ^CPU, mem: []u8, data: u16) {
     call(cpu, mem, 0x38)
 }
 
+// PREFIXED INSTRUCTIONS
+RLC_0x00 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+}
