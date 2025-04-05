@@ -247,6 +247,58 @@ swap_bytes :: proc(t: ^testing.T) {
 }
 
 @(test)
+bit_is_set :: proc(t: ^testing.T) {
+    cpu := CPU{}
+    v: u8 = 0x42
+
+    bit(&cpu, &v, 0)
+    testing.expect(t, !read_flag(&cpu, Flags.Z))
+
+    bit(&cpu, &v, 1)
+    testing.expect(t, read_flag(&cpu, Flags.Z))
+
+    bit(&cpu, &v, 6)
+    testing.expect(t, read_flag(&cpu, Flags.Z))
+
+    bit(&cpu, &v, 7)
+    testing.expect(t, !read_flag(&cpu, Flags.Z))
+}
+
+@(test)
+reset_bit :: proc(t: ^testing.T) {
+    cpu := CPU{}
+    v: u8 = 0x42
+
+    res(&cpu, &v, 1)
+    res(&cpu, &v, 6)
+    res(&cpu, &v, 7)
+
+    bit(&cpu, &v, 1)
+    testing.expect(t, !read_flag(&cpu, Flags.Z))
+    bit(&cpu, &v, 6)
+    testing.expect(t, !read_flag(&cpu, Flags.Z))
+    bit(&cpu, &v, 7)
+    testing.expect(t, !read_flag(&cpu, Flags.Z))
+}
+
+@(test)
+set_bit :: proc(t: ^testing.T) {
+    cpu := CPU{}
+    v: u8 = 0
+
+    set(&cpu, &v, 1)
+    set(&cpu, &v, 6)
+    set(&cpu, &v, 7)
+
+    bit(&cpu, &v, 1)
+    testing.expect(t, read_flag(&cpu, Flags.Z))
+    bit(&cpu, &v, 6)
+    testing.expect(t, read_flag(&cpu, Flags.Z))
+    bit(&cpu, &v, 7)
+    testing.expect(t, read_flag(&cpu, Flags.Z))
+}
+
+@(test)
 stack :: proc(t: ^testing.T) {
     cpu := CPU{}
     mem: [0xFFFF]u8
@@ -319,4 +371,42 @@ stack :: proc(t: ^testing.T) {
 
      testing.expect_value(t, cpu.exec_cyles, 7)
      testing.expect_value(t, cpu.bc, 0x4211) // incremented
+ }
+
+ @(test)
+ ei :: proc(t: ^testing.T) {
+     cpu := CPU{}
+     mem: [0xFFFF]u8
+
+     cpu_init(&cpu)
+
+     testing.expect_value(t, cpu.enable_interrupts, false)
+
+     mem[cpu.pc] = 0xFB // EI
+     mem[cpu.pc + 1] = 0x00 // NOP
+     mem[cpu.pc + 2] = 0x00 // NOP
+
+     cpu_tick(&cpu, mem[:])
+
+     // EI instruction takes 4 t cycles
+     testing.expect_value(t, cpu.exec_cyles, 3)
+     testing.expect_value(t, cpu.enable_interrupts, false)
+
+     cpu_tick(&cpu, mem[:])
+     cpu_tick(&cpu, mem[:])
+     cpu_tick(&cpu, mem[:])
+
+     testing.expect_value(t, cpu.enable_interrupts, true)
+     // IME should still be false at this point, it should only be set after
+     // the next instruction
+     testing.expect_value(t, cpu.ime, false)
+
+     // execute NOP right after EI
+     cpu_tick(&cpu, mem[:])
+     cpu_tick(&cpu, mem[:])
+     cpu_tick(&cpu, mem[:])
+     cpu_tick(&cpu, mem[:])
+
+     testing.expect_value(t, cpu.ime, true)
+     testing.expect_value(t, cpu.enable_interrupts, false)
  }

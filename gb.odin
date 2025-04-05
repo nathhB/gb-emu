@@ -6,7 +6,7 @@ import "core:log"
 DotNs: i64 = 238 // 1 dot = 2^22 Hz, 1 dot = 1 T-Cycle, 1 M-Cycle = 4 T-Cycle
 
 GB :: struct {
-    mem: [0xFFFF]u8,
+    mem: [0xFFFF + 1]u8,
     cpu: CPU,
     ppu: PPU
 }

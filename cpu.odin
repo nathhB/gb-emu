@@ -4,6 +4,10 @@ import "core:log"
 
 Flags :: enum { Z, N, H, C }
 
+Interrupts :: enum { VBlank, LCD, Timer, Serial, Joypad }
+
+CpuState :: enum { Fetch, ExecuteInstruction, ExecuteInterrupt }
+
 CPU :: struct {
     af: u16,
     bc: u16,
@@ -11,10 +15,15 @@ CPU :: struct {
     hl: u16,
     sp: u16,
     pc: u16,
+    ime: bool,
     instructions: [0xFF]Instruction,
     prefixed_instructions: [0xFF]Instruction,
+    state: CpuState,
+    exec_op: u8,
     exec_cyles: int,
-    prefix: bool
+    prefix: bool,
+    enable_interrupts: bool,
+
 }
 
 Instruction :: struct {
@@ -29,25 +38,33 @@ cpu_init :: proc(cpu: ^CPU) {
     cpu.instructions[0x01] = Instruction{3, 12, LD_0x01}
     cpu.instructions[0x02] = Instruction{1, 8, LD_0x02}
     cpu.instructions[0x03] = Instruction{1, 8, INC_0x03}
+    cpu.instructions[0xFB] = Instruction{1, 4, EI_0xfb}
 
     // prefixed
     cpu.prefixed_instructions[0x00] = Instruction{}
 
+    cpu.state = CpuState.Fetch
     cpu.pc = 0x100
     cpu.sp = 0xFFFE
 }
 
 cpu_tick :: proc(cpu: ^CPU, mem: []u8) {
-    if cpu.exec_cyles > 0 {
-        cpu.exec_cyles -= 1
-
-        return
+    switch cpu.state {
+    case CpuState.Fetch:
+        do_fetch_state(cpu, mem)
+    case CpuState.ExecuteInstruction:
+        do_execute_instruction_state(cpu, mem)
+    case CpuState.ExecuteInterrupt:
+        do_execute_interrupt_state(cpu, mem)
     }
+}
 
+do_fetch_state :: proc(cpu: ^CPU, mem: []u8) {
     op := mem[cpu.pc]
     instructions := cpu.prefix ? cpu.prefixed_instructions[:] : cpu.instructions[:]
     instruction := instructions[op]
 
+    cpu.exec_op = op
     cpu.pc += 1
     cpu.prefix = false
 
@@ -62,6 +79,33 @@ cpu_tick :: proc(cpu: ^CPU, mem: []u8) {
 
     instruction.func(cpu, mem, data)
     cpu.exec_cyles = instruction.cycles - 1
+    cpu.state = CpuState.ExecuteInstruction
+}
+
+do_execute_instruction_state :: proc(cpu: ^CPU, mem: []u8) {
+    cpu.exec_cyles -= 1
+
+    if (cpu.exec_cyles > 0) {
+        return
+    }
+
+    // instruction is done at this point
+
+    if (cpu.enable_interrupts) {
+        cpu.ime = true
+        cpu.enable_interrupts = false
+    }
+
+    if (cpu.exec_op == 0xFB) {
+        // enable interrupts after the next instruction if the last executed
+        // operation is EI
+        cpu.enable_interrupts = true
+    }
+
+    cpu.state = CpuState.Fetch
+}
+
+do_execute_interrupt_state :: proc(cpu: ^CPU, mem: []u8) {
 }
 
 fetch :: proc(cpu: ^CPU, mem: []u8, len: int) -> u16 {
@@ -74,6 +118,49 @@ fetch :: proc(cpu: ^CPU, mem: []u8, len: int) -> u16 {
     }
 
     return data
+}
+
+check_interrupts :: proc(cpu: ^CPU, mem: []u8) {
+    if (!cpu.ime) {
+        return
+    }
+
+    if check_interrupt(cpu, mem, Interrupts.VBlank) {
+
+    }
+
+    if check_interrupt(cpu, mem, Interrupts.LCD) {
+
+    }
+
+    if check_interrupt(cpu, mem, Interrupts.Timer) {
+
+    }
+
+    if check_interrupt(cpu, mem, Interrupts.Serial) {
+
+    }
+
+    if check_interrupt(cpu, mem, Interrupts.Joypad) {
+
+    }
+}
+
+check_interrupt :: proc(cpu: ^CPU, mem: []u8, interrupt: Interrupts) -> bool {
+    i_e := mem[0xFFFF]
+    i_f := mem[0xFF0F]
+    interrupt_mask := u8(1) << u8(interrupt)
+
+    return i_e & interrupt_mask > 0 && i_f & interrupt_mask > 0
+}
+
+call_interrupt :: proc(cpu: ^CPU, mem: []u8, interrupt: Interrupts) {
+    // TODO: call
+
+    i_f := &mem[0xFF0F]
+
+    i_f^ &= ~(1 << u8(interrupt))
+    cpu.ime = false
 }
 
 write_register_high :: proc(reg: ^u16, value: u8) {
@@ -424,6 +511,20 @@ swap :: proc(cpu: ^CPU, byte: ^u8) {
     write_flag(cpu, Flags.C, false)
 }
 
+bit :: proc(cpu: ^CPU, byte: ^u8, b: u8) {
+    write_flag(cpu, Flags.Z, byte^ & (1 << b) > 0)
+    write_flag(cpu, Flags.N, false)
+    write_flag(cpu, Flags.H, true)
+}
+
+res :: proc(cpu: ^CPU, byte: ^u8, b: u8) {
+    byte^ &= ~(1 << b)
+}
+
+set :: proc(cpu: ^CPU, byte: ^u8, b: u8) {
+    byte^ |= (1 << b)
+}
+
 // UNPREFIXED INSTRUCTIONS
 
 // GROUP: control/misc
@@ -474,7 +575,7 @@ PREFIX_0xcb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
     Flags: - - - -
 */
 DI_0xf3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    // TODO
+    cpu.ime = false
 }
 
 /*
@@ -484,7 +585,7 @@ DI_0xf3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
     Flags: - - - -
 */
 EI_0xfb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    // TODO
+    // see the 'do_execute_instruction_state' function
 }
 
 // GROUP: x16/lsm
@@ -2890,7 +2991,7 @@ RET_0xd8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
 */
 RETI_0xd9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
     ret(cpu, mem)
-    // TODO: enable interrupts
+    cpu.ime = true
 }
 
 /*
