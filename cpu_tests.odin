@@ -233,6 +233,22 @@ rra :: proc(t: ^testing.T) {
 }
 
 @(test)
+sra_srl :: proc(t: ^testing.T) {
+    cpu := CPU{}
+    mem: [0xFFFF]u8
+
+    v: u8 = 0xA4
+
+    sra(&cpu, &v)
+    testing.expect_value(t, v, 0xD2)
+
+    v = 0xA4
+
+    srl(&cpu, &v)
+    testing.expect_value(t, v, 0x52)
+}
+
+@(test)
 swap_bytes :: proc(t: ^testing.T) {
     cpu := CPU{}
     v: u8 = 0x42
