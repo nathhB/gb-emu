@@ -4,7 +4,8 @@ import "core:log"
 
 Flags :: enum { Z, N, H, C }
 
-Interrupts :: enum { VBlank, LCD, Timer, Serial, Joypad }
+// enum order matters: from highest to lowest priority
+Interrupt :: enum { VBlank, LCD, Timer, Serial, Joypad }
 
 CpuState :: enum { Fetch, ExecuteInstruction, ExecuteInterrupt }
 
@@ -16,8 +17,9 @@ CPU :: struct {
     sp: u16,
     pc: u16,
     ime: bool,
-    instructions: [0xFF]Instruction,
-    prefixed_instructions: [0xFF]Instruction,
+    instructions: [0xFF+1]Instruction,
+    prefixed_instructions: [0xFF+1]Instruction,
+    interrupt_handlers: [5]u16,
     state: CpuState,
     exec_op: u8,
     exec_cyles: int,
@@ -33,15 +35,14 @@ Instruction :: struct {
 }
 
 cpu_init :: proc(cpu: ^CPU) {
-    // unprefixed
-    cpu.instructions[0x00] = Instruction{1, 4, NOP_0x00}
-    cpu.instructions[0x01] = Instruction{3, 12, LD_0x01}
-    cpu.instructions[0x02] = Instruction{1, 8, LD_0x02}
-    cpu.instructions[0x03] = Instruction{1, 8, INC_0x03}
-    cpu.instructions[0xFB] = Instruction{1, 4, EI_0xfb}
+    create_prefixed_instructions(cpu)
+    create_unprefixed_instructions(cpu)
 
-    // prefixed
-    cpu.prefixed_instructions[0x00] = Instruction{}
+    cpu.interrupt_handlers[Interrupt.VBlank] = 0x40
+    cpu.interrupt_handlers[Interrupt.LCD] = 0x48
+    cpu.interrupt_handlers[Interrupt.Timer] = 0x50
+    cpu.interrupt_handlers[Interrupt.Serial] = 0x58
+    cpu.interrupt_handlers[Interrupt.Joypad] = 0x60
 
     cpu.state = CpuState.Fetch
     cpu.pc = 0x100
@@ -59,7 +60,17 @@ cpu_tick :: proc(cpu: ^CPU, mem: []u8) {
     }
 }
 
+cpu_request_interrupt :: proc(cpu: ^CPU, mem: []u8, interrupt: Interrupt) {
+    i_f := &mem[0xFF0F]
+
+    i_f^ |= (1 << u8(interrupt))
+}
+
 do_fetch_state :: proc(cpu: ^CPU, mem: []u8) {
+    if check_interrupts(cpu, mem) {
+        return
+    }
+
     op := mem[cpu.pc]
     instructions := cpu.prefix ? cpu.prefixed_instructions[:] : cpu.instructions[:]
     instruction := instructions[op]
@@ -106,6 +117,13 @@ do_execute_instruction_state :: proc(cpu: ^CPU, mem: []u8) {
 }
 
 do_execute_interrupt_state :: proc(cpu: ^CPU, mem: []u8) {
+    cpu.exec_cyles -= 1
+
+    if (cpu.exec_cyles > 0) {
+        return
+    }
+
+    cpu.state = CpuState.Fetch
 }
 
 fetch :: proc(cpu: ^CPU, mem: []u8, len: int) -> u16 {
@@ -120,33 +138,23 @@ fetch :: proc(cpu: ^CPU, mem: []u8, len: int) -> u16 {
     return data
 }
 
-check_interrupts :: proc(cpu: ^CPU, mem: []u8) {
+check_interrupts :: proc(cpu: ^CPU, mem: []u8) -> bool {
     if (!cpu.ime) {
-        return
+        return false
     }
 
-    if check_interrupt(cpu, mem, Interrupts.VBlank) {
+    for interrupt in Interrupt {
+        if check_interrupt(cpu, mem, interrupt) {
+            execute_interrupt(cpu, mem, interrupt)
 
+            return true
+        }
     }
 
-    if check_interrupt(cpu, mem, Interrupts.LCD) {
-
-    }
-
-    if check_interrupt(cpu, mem, Interrupts.Timer) {
-
-    }
-
-    if check_interrupt(cpu, mem, Interrupts.Serial) {
-
-    }
-
-    if check_interrupt(cpu, mem, Interrupts.Joypad) {
-
-    }
+    return false
 }
 
-check_interrupt :: proc(cpu: ^CPU, mem: []u8, interrupt: Interrupts) -> bool {
+check_interrupt :: proc(cpu: ^CPU, mem: []u8, interrupt: Interrupt) -> bool {
     i_e := mem[0xFFFF]
     i_f := mem[0xFF0F]
     interrupt_mask := u8(1) << u8(interrupt)
@@ -154,13 +162,14 @@ check_interrupt :: proc(cpu: ^CPU, mem: []u8, interrupt: Interrupts) -> bool {
     return i_e & interrupt_mask > 0 && i_f & interrupt_mask > 0
 }
 
-call_interrupt :: proc(cpu: ^CPU, mem: []u8, interrupt: Interrupts) {
-    // TODO: call
-
+execute_interrupt :: proc(cpu: ^CPU, mem: []u8, interrupt: Interrupt) {
     i_f := &mem[0xFF0F]
 
     i_f^ &= ~(1 << u8(interrupt))
+    call(cpu, mem, cpu.interrupt_handlers[interrupt])
     cpu.ime = false
+    cpu.state = CpuState.ExecuteInterrupt
+    cpu.exec_cyles = 5 * 4 // interrupt handle takes 5 M-cycles
 }
 
 write_register_high :: proc(reg: ^u16, value: u8) {
@@ -5804,4 +5813,511 @@ SET_0xfe :: proc(cpu: ^CPU, mem: []u8, data: u16) {
 */
 SET_0xff :: proc(cpu: ^CPU, mem: []u8, data: u16) {
   set_register_high(cpu, &cpu.af, 7)
+}
+
+create_unprefixed_instructions :: proc(cpu: ^CPU) {
+    cpu.instructions[0x00] = Instruction{1, 4, NOP_0x00}
+    cpu.instructions[0x01] = Instruction{3, 12, LD_0x01}
+    cpu.instructions[0x02] = Instruction{1, 8, LD_0x02}
+    cpu.instructions[0x03] = Instruction{1, 8, INC_0x03}
+    cpu.instructions[0x04] = Instruction{1, 4, INC_0x04}
+    cpu.instructions[0x05] = Instruction{1, 4, DEC_0x05}
+    cpu.instructions[0x06] = Instruction{2, 8, LD_0x06}
+    cpu.instructions[0x07] = Instruction{1, 4, RLCA_0x07}
+    cpu.instructions[0x08] = Instruction{3, 20, LD_0x08}
+    cpu.instructions[0x09] = Instruction{1, 8, ADD_0x09}
+    cpu.instructions[0x0a] = Instruction{1, 8, LD_0x0a}
+    cpu.instructions[0x0b] = Instruction{1, 8, DEC_0x0b}
+    cpu.instructions[0x0c] = Instruction{1, 4, INC_0x0c}
+    cpu.instructions[0x0d] = Instruction{1, 4, DEC_0x0d}
+    cpu.instructions[0x0e] = Instruction{2, 8, LD_0x0e}
+    cpu.instructions[0x0f] = Instruction{1, 4, RRCA_0x0f}
+    cpu.instructions[0x10] = Instruction{1, 4, STOP_0x10}
+    cpu.instructions[0x11] = Instruction{3, 12, LD_0x11}
+    cpu.instructions[0x12] = Instruction{1, 8, LD_0x12}
+    cpu.instructions[0x13] = Instruction{1, 8, INC_0x13}
+    cpu.instructions[0x14] = Instruction{1, 4, INC_0x14}
+    cpu.instructions[0x15] = Instruction{1, 4, DEC_0x15}
+    cpu.instructions[0x16] = Instruction{2, 8, LD_0x16}
+    cpu.instructions[0x17] = Instruction{1, 4, RLA_0x17}
+    cpu.instructions[0x18] = Instruction{2, 12, JR_0x18}
+    cpu.instructions[0x19] = Instruction{1, 8, ADD_0x19}
+    cpu.instructions[0x1a] = Instruction{1, 8, LD_0x1a}
+    cpu.instructions[0x1b] = Instruction{1, 8, DEC_0x1b}
+    cpu.instructions[0x1c] = Instruction{1, 4, INC_0x1c}
+    cpu.instructions[0x1d] = Instruction{1, 4, DEC_0x1d}
+    cpu.instructions[0x1e] = Instruction{2, 8, LD_0x1e}
+    cpu.instructions[0x1f] = Instruction{1, 4, RRA_0x1f}
+    cpu.instructions[0x20] = Instruction{2, 12, JR_0x20}
+    cpu.instructions[0x21] = Instruction{3, 12, LD_0x21}
+    cpu.instructions[0x22] = Instruction{1, 8, LD_0x22}
+    cpu.instructions[0x23] = Instruction{1, 8, INC_0x23}
+    cpu.instructions[0x24] = Instruction{1, 4, INC_0x24}
+    cpu.instructions[0x25] = Instruction{1, 4, DEC_0x25}
+    cpu.instructions[0x26] = Instruction{2, 8, LD_0x26}
+    cpu.instructions[0x27] = Instruction{1, 4, DAA_0x27}
+    cpu.instructions[0x28] = Instruction{2, 12, JR_0x28}
+    cpu.instructions[0x29] = Instruction{1, 8, ADD_0x29}
+    cpu.instructions[0x2a] = Instruction{1, 8, LD_0x2a}
+    cpu.instructions[0x2b] = Instruction{1, 8, DEC_0x2b}
+    cpu.instructions[0x2c] = Instruction{1, 4, INC_0x2c}
+    cpu.instructions[0x2d] = Instruction{1, 4, DEC_0x2d}
+    cpu.instructions[0x2e] = Instruction{2, 8, LD_0x2e}
+    cpu.instructions[0x2f] = Instruction{1, 4, CPL_0x2f}
+    cpu.instructions[0x30] = Instruction{2, 12, JR_0x30}
+    cpu.instructions[0x31] = Instruction{3, 12, LD_0x31}
+    cpu.instructions[0x32] = Instruction{1, 8, LD_0x32}
+    cpu.instructions[0x33] = Instruction{1, 8, INC_0x33}
+    cpu.instructions[0x34] = Instruction{1, 12, INC_0x34}
+    cpu.instructions[0x35] = Instruction{1, 12, DEC_0x35}
+    cpu.instructions[0x36] = Instruction{2, 12, LD_0x36}
+    cpu.instructions[0x37] = Instruction{1, 4, SCF_0x37}
+    cpu.instructions[0x38] = Instruction{2, 12, JR_0x38}
+    cpu.instructions[0x39] = Instruction{1, 8, ADD_0x39}
+    cpu.instructions[0x3a] = Instruction{1, 8, LD_0x3a}
+    cpu.instructions[0x3b] = Instruction{1, 8, DEC_0x3b}
+    cpu.instructions[0x3c] = Instruction{1, 4, INC_0x3c}
+    cpu.instructions[0x3d] = Instruction{1, 4, DEC_0x3d}
+    cpu.instructions[0x3e] = Instruction{2, 8, LD_0x3e}
+    cpu.instructions[0x3f] = Instruction{1, 4, CCF_0x3f}
+    cpu.instructions[0x40] = Instruction{1, 4, LD_0x40}
+    cpu.instructions[0x41] = Instruction{1, 4, LD_0x41}
+    cpu.instructions[0x42] = Instruction{1, 4, LD_0x42}
+    cpu.instructions[0x43] = Instruction{1, 4, LD_0x43}
+    cpu.instructions[0x44] = Instruction{1, 4, LD_0x44}
+    cpu.instructions[0x45] = Instruction{1, 4, LD_0x45}
+    cpu.instructions[0x46] = Instruction{1, 8, LD_0x46}
+    cpu.instructions[0x47] = Instruction{1, 4, LD_0x47}
+    cpu.instructions[0x48] = Instruction{1, 4, LD_0x48}
+    cpu.instructions[0x49] = Instruction{1, 4, LD_0x49}
+    cpu.instructions[0x4a] = Instruction{1, 4, LD_0x4a}
+    cpu.instructions[0x4b] = Instruction{1, 4, LD_0x4b}
+    cpu.instructions[0x4c] = Instruction{1, 4, LD_0x4c}
+    cpu.instructions[0x4d] = Instruction{1, 4, LD_0x4d}
+    cpu.instructions[0x4e] = Instruction{1, 8, LD_0x4e}
+    cpu.instructions[0x4f] = Instruction{1, 4, LD_0x4f}
+    cpu.instructions[0x50] = Instruction{1, 4, LD_0x50}
+    cpu.instructions[0x51] = Instruction{1, 4, LD_0x51}
+    cpu.instructions[0x52] = Instruction{1, 4, LD_0x52}
+    cpu.instructions[0x53] = Instruction{1, 4, LD_0x53}
+    cpu.instructions[0x54] = Instruction{1, 4, LD_0x54}
+    cpu.instructions[0x55] = Instruction{1, 4, LD_0x55}
+    cpu.instructions[0x56] = Instruction{1, 8, LD_0x56}
+    cpu.instructions[0x57] = Instruction{1, 4, LD_0x57}
+    cpu.instructions[0x58] = Instruction{1, 4, LD_0x58}
+    cpu.instructions[0x59] = Instruction{1, 4, LD_0x59}
+    cpu.instructions[0x5a] = Instruction{1, 4, LD_0x5a}
+    cpu.instructions[0x5b] = Instruction{1, 4, LD_0x5b}
+    cpu.instructions[0x5c] = Instruction{1, 4, LD_0x5c}
+    cpu.instructions[0x5d] = Instruction{1, 4, LD_0x5d}
+    cpu.instructions[0x5e] = Instruction{1, 8, LD_0x5e}
+    cpu.instructions[0x5f] = Instruction{1, 4, LD_0x5f}
+    cpu.instructions[0x60] = Instruction{1, 4, LD_0x60}
+    cpu.instructions[0x61] = Instruction{1, 4, LD_0x61}
+    cpu.instructions[0x62] = Instruction{1, 4, LD_0x62}
+    cpu.instructions[0x63] = Instruction{1, 4, LD_0x63}
+    cpu.instructions[0x64] = Instruction{1, 4, LD_0x64}
+    cpu.instructions[0x65] = Instruction{1, 4, LD_0x65}
+    cpu.instructions[0x66] = Instruction{1, 8, LD_0x66}
+    cpu.instructions[0x67] = Instruction{1, 4, LD_0x67}
+    cpu.instructions[0x68] = Instruction{1, 4, LD_0x68}
+    cpu.instructions[0x69] = Instruction{1, 4, LD_0x69}
+    cpu.instructions[0x6a] = Instruction{1, 4, LD_0x6a}
+    cpu.instructions[0x6b] = Instruction{1, 4, LD_0x6b}
+    cpu.instructions[0x6c] = Instruction{1, 4, LD_0x6c}
+    cpu.instructions[0x6d] = Instruction{1, 4, LD_0x6d}
+    cpu.instructions[0x6e] = Instruction{1, 8, LD_0x6e}
+    cpu.instructions[0x6f] = Instruction{1, 4, LD_0x6f}
+    cpu.instructions[0x70] = Instruction{1, 8, LD_0x70}
+    cpu.instructions[0x71] = Instruction{1, 8, LD_0x71}
+    cpu.instructions[0x72] = Instruction{1, 8, LD_0x72}
+    cpu.instructions[0x73] = Instruction{1, 8, LD_0x73}
+    cpu.instructions[0x74] = Instruction{1, 8, LD_0x74}
+    cpu.instructions[0x75] = Instruction{1, 8, LD_0x75}
+    cpu.instructions[0x76] = Instruction{1, 4, HALT_0x76}
+    cpu.instructions[0x77] = Instruction{1, 8, LD_0x77}
+    cpu.instructions[0x78] = Instruction{1, 4, LD_0x78}
+    cpu.instructions[0x79] = Instruction{1, 4, LD_0x79}
+    cpu.instructions[0x7a] = Instruction{1, 4, LD_0x7a}
+    cpu.instructions[0x7b] = Instruction{1, 4, LD_0x7b}
+    cpu.instructions[0x7c] = Instruction{1, 4, LD_0x7c}
+    cpu.instructions[0x7d] = Instruction{1, 4, LD_0x7d}
+    cpu.instructions[0x7e] = Instruction{1, 8, LD_0x7e}
+    cpu.instructions[0x7f] = Instruction{1, 4, LD_0x7f}
+    cpu.instructions[0x80] = Instruction{1, 4, ADD_0x80}
+    cpu.instructions[0x81] = Instruction{1, 4, ADD_0x81}
+    cpu.instructions[0x82] = Instruction{1, 4, ADD_0x82}
+    cpu.instructions[0x83] = Instruction{1, 4, ADD_0x83}
+    cpu.instructions[0x84] = Instruction{1, 4, ADD_0x84}
+    cpu.instructions[0x85] = Instruction{1, 4, ADD_0x85}
+    cpu.instructions[0x86] = Instruction{1, 8, ADD_0x86}
+    cpu.instructions[0x87] = Instruction{1, 4, ADD_0x87}
+    cpu.instructions[0x88] = Instruction{1, 4, ADC_0x88}
+    cpu.instructions[0x89] = Instruction{1, 4, ADC_0x89}
+    cpu.instructions[0x8a] = Instruction{1, 4, ADC_0x8a}
+    cpu.instructions[0x8b] = Instruction{1, 4, ADC_0x8b}
+    cpu.instructions[0x8c] = Instruction{1, 4, ADC_0x8c}
+    cpu.instructions[0x8d] = Instruction{1, 4, ADC_0x8d}
+    cpu.instructions[0x8e] = Instruction{1, 8, ADC_0x8e}
+    cpu.instructions[0x8f] = Instruction{1, 4, ADC_0x8f}
+    cpu.instructions[0x90] = Instruction{1, 4, SUB_0x90}
+    cpu.instructions[0x91] = Instruction{1, 4, SUB_0x91}
+    cpu.instructions[0x92] = Instruction{1, 4, SUB_0x92}
+    cpu.instructions[0x93] = Instruction{1, 4, SUB_0x93}
+    cpu.instructions[0x94] = Instruction{1, 4, SUB_0x94}
+    cpu.instructions[0x95] = Instruction{1, 4, SUB_0x95}
+    cpu.instructions[0x96] = Instruction{1, 8, SUB_0x96}
+    cpu.instructions[0x97] = Instruction{1, 4, SUB_0x97}
+    cpu.instructions[0x98] = Instruction{1, 4, SBC_0x98}
+    cpu.instructions[0x99] = Instruction{1, 4, SBC_0x99}
+    cpu.instructions[0x9a] = Instruction{1, 4, SBC_0x9a}
+    cpu.instructions[0x9b] = Instruction{1, 4, SBC_0x9b}
+    cpu.instructions[0x9c] = Instruction{1, 4, SBC_0x9c}
+    cpu.instructions[0x9d] = Instruction{1, 4, SBC_0x9d}
+    cpu.instructions[0x9e] = Instruction{1, 8, SBC_0x9e}
+    cpu.instructions[0x9f] = Instruction{1, 4, SBC_0x9f}
+    cpu.instructions[0xa0] = Instruction{1, 4, AND_0xa0}
+    cpu.instructions[0xa1] = Instruction{1, 4, AND_0xa1}
+    cpu.instructions[0xa2] = Instruction{1, 4, AND_0xa2}
+    cpu.instructions[0xa3] = Instruction{1, 4, AND_0xa3}
+    cpu.instructions[0xa4] = Instruction{1, 4, AND_0xa4}
+    cpu.instructions[0xa5] = Instruction{1, 4, AND_0xa5}
+    cpu.instructions[0xa6] = Instruction{1, 8, AND_0xa6}
+    cpu.instructions[0xa7] = Instruction{1, 4, AND_0xa7}
+    cpu.instructions[0xa8] = Instruction{1, 4, XOR_0xa8}
+    cpu.instructions[0xa9] = Instruction{1, 4, XOR_0xa9}
+    cpu.instructions[0xaa] = Instruction{1, 4, XOR_0xaa}
+    cpu.instructions[0xab] = Instruction{1, 4, XOR_0xab}
+    cpu.instructions[0xac] = Instruction{1, 4, XOR_0xac}
+    cpu.instructions[0xad] = Instruction{1, 4, XOR_0xad}
+    cpu.instructions[0xae] = Instruction{1, 8, XOR_0xae}
+    cpu.instructions[0xaf] = Instruction{1, 4, XOR_0xaf}
+    cpu.instructions[0xb0] = Instruction{1, 4, OR_0xb0}
+    cpu.instructions[0xb1] = Instruction{1, 4, OR_0xb1}
+    cpu.instructions[0xb2] = Instruction{1, 4, OR_0xb2}
+    cpu.instructions[0xb3] = Instruction{1, 4, OR_0xb3}
+    cpu.instructions[0xb4] = Instruction{1, 4, OR_0xb4}
+    cpu.instructions[0xb5] = Instruction{1, 4, OR_0xb5}
+    cpu.instructions[0xb6] = Instruction{1, 8, OR_0xb6}
+    cpu.instructions[0xb7] = Instruction{1, 4, OR_0xb7}
+    cpu.instructions[0xb8] = Instruction{1, 4, CP_0xb8}
+    cpu.instructions[0xb9] = Instruction{1, 4, CP_0xb9}
+    cpu.instructions[0xba] = Instruction{1, 4, CP_0xba}
+    cpu.instructions[0xbb] = Instruction{1, 4, CP_0xbb}
+    cpu.instructions[0xbc] = Instruction{1, 4, CP_0xbc}
+    cpu.instructions[0xbd] = Instruction{1, 4, CP_0xbd}
+    cpu.instructions[0xbe] = Instruction{1, 8, CP_0xbe}
+    cpu.instructions[0xbf] = Instruction{1, 4, CP_0xbf}
+    cpu.instructions[0xc0] = Instruction{1, 20, RET_0xc0}
+    cpu.instructions[0xc1] = Instruction{1, 12, POP_0xc1}
+    cpu.instructions[0xc2] = Instruction{3, 16, JP_0xc2}
+    cpu.instructions[0xc3] = Instruction{3, 16, JP_0xc3}
+    cpu.instructions[0xc4] = Instruction{3, 24, CALL_0xc4}
+    cpu.instructions[0xc5] = Instruction{1, 16, PUSH_0xc5}
+    cpu.instructions[0xc6] = Instruction{2, 8, ADD_0xc6}
+    cpu.instructions[0xc7] = Instruction{1, 16, RST_0xc7}
+    cpu.instructions[0xc8] = Instruction{1, 20, RET_0xc8}
+    cpu.instructions[0xc9] = Instruction{1, 16, RET_0xc9}
+    cpu.instructions[0xca] = Instruction{3, 16, JP_0xca}
+    cpu.instructions[0xcb] = Instruction{1, 4, PREFIX_0xcb}
+    cpu.instructions[0xcc] = Instruction{3, 24, CALL_0xcc}
+    cpu.instructions[0xcd] = Instruction{3, 24, CALL_0xcd}
+    cpu.instructions[0xce] = Instruction{2, 8, ADC_0xce}
+    cpu.instructions[0xcf] = Instruction{1, 16, RST_0xcf}
+    cpu.instructions[0xd0] = Instruction{1, 20, RET_0xd0}
+    cpu.instructions[0xd1] = Instruction{1, 12, POP_0xd1}
+    cpu.instructions[0xd2] = Instruction{3, 16, JP_0xd2}
+    cpu.instructions[0xd4] = Instruction{3, 24, CALL_0xd4}
+    cpu.instructions[0xd5] = Instruction{1, 16, PUSH_0xd5}
+    cpu.instructions[0xd6] = Instruction{2, 8, SUB_0xd6}
+    cpu.instructions[0xd7] = Instruction{1, 16, RST_0xd7}
+    cpu.instructions[0xd8] = Instruction{1, 20, RET_0xd8}
+    cpu.instructions[0xd9] = Instruction{1, 16, RETI_0xd9}
+    cpu.instructions[0xda] = Instruction{3, 16, JP_0xda}
+    cpu.instructions[0xdc] = Instruction{3, 24, CALL_0xdc}
+    cpu.instructions[0xde] = Instruction{2, 8, SBC_0xde}
+    cpu.instructions[0xdf] = Instruction{1, 16, RST_0xdf}
+    cpu.instructions[0xe0] = Instruction{2, 12, LDH_0xe0}
+    cpu.instructions[0xe1] = Instruction{1, 12, POP_0xe1}
+    cpu.instructions[0xe2] = Instruction{1, 8, LD_0xe2}
+    cpu.instructions[0xe5] = Instruction{1, 16, PUSH_0xe5}
+    cpu.instructions[0xe6] = Instruction{2, 8, AND_0xe6}
+    cpu.instructions[0xe7] = Instruction{1, 16, RST_0xe7}
+    cpu.instructions[0xe8] = Instruction{2, 16, ADD_0xe8}
+    cpu.instructions[0xe9] = Instruction{1, 4, JP_0xe9}
+    cpu.instructions[0xea] = Instruction{3, 16, LD_0xea}
+    cpu.instructions[0xee] = Instruction{2, 8, XOR_0xee}
+    cpu.instructions[0xef] = Instruction{1, 16, RST_0xef}
+    cpu.instructions[0xf0] = Instruction{2, 12, LDH_0xf0}
+    cpu.instructions[0xf1] = Instruction{1, 12, POP_0xf1}
+    cpu.instructions[0xf2] = Instruction{1, 8, LD_0xf2}
+    cpu.instructions[0xf3] = Instruction{1, 4, DI_0xf3}
+    cpu.instructions[0xf5] = Instruction{1, 16, PUSH_0xf5}
+    cpu.instructions[0xf6] = Instruction{2, 8, OR_0xf6}
+    cpu.instructions[0xf7] = Instruction{1, 16, RST_0xf7}
+    cpu.instructions[0xf8] = Instruction{2, 12, LD_0xf8}
+    cpu.instructions[0xf9] = Instruction{1, 8, LD_0xf9}
+    cpu.instructions[0xfa] = Instruction{3, 16, LD_0xfa}
+    cpu.instructions[0xfb] = Instruction{1, 4, EI_0xfb}
+    cpu.instructions[0xfe] = Instruction{2, 8, CP_0xfe}
+    cpu.instructions[0xff] = Instruction{1, 16, RST_0xff}
+}
+
+create_prefixed_instructions :: proc(cpu: ^CPU) {
+    cpu.instructions[0x00] = Instruction{2, 8, RLC_0x00}
+    cpu.instructions[0x01] = Instruction{2, 8, RLC_0x01}
+    cpu.instructions[0x02] = Instruction{2, 8, RLC_0x02}
+    cpu.instructions[0x03] = Instruction{2, 8, RLC_0x03}
+    cpu.instructions[0x04] = Instruction{2, 8, RLC_0x04}
+    cpu.instructions[0x05] = Instruction{2, 8, RLC_0x05}
+    cpu.instructions[0x06] = Instruction{2, 16, RLC_0x06}
+    cpu.instructions[0x07] = Instruction{2, 8, RLC_0x07}
+    cpu.instructions[0x08] = Instruction{2, 8, RRC_0x08}
+    cpu.instructions[0x09] = Instruction{2, 8, RRC_0x09}
+    cpu.instructions[0x0a] = Instruction{2, 8, RRC_0x0a}
+    cpu.instructions[0x0b] = Instruction{2, 8, RRC_0x0b}
+    cpu.instructions[0x0c] = Instruction{2, 8, RRC_0x0c}
+    cpu.instructions[0x0d] = Instruction{2, 8, RRC_0x0d}
+    cpu.instructions[0x0e] = Instruction{2, 16, RRC_0x0e}
+    cpu.instructions[0x0f] = Instruction{2, 8, RRC_0x0f}
+    cpu.instructions[0x10] = Instruction{2, 8, RL_0x10}
+    cpu.instructions[0x11] = Instruction{2, 8, RL_0x11}
+    cpu.instructions[0x12] = Instruction{2, 8, RL_0x12}
+    cpu.instructions[0x13] = Instruction{2, 8, RL_0x13}
+    cpu.instructions[0x14] = Instruction{2, 8, RL_0x14}
+    cpu.instructions[0x15] = Instruction{2, 8, RL_0x15}
+    cpu.instructions[0x16] = Instruction{2, 16, RL_0x16}
+    cpu.instructions[0x17] = Instruction{2, 8, RL_0x17}
+    cpu.instructions[0x18] = Instruction{2, 8, RR_0x18}
+    cpu.instructions[0x19] = Instruction{2, 8, RR_0x19}
+    cpu.instructions[0x1a] = Instruction{2, 8, RR_0x1a}
+    cpu.instructions[0x1b] = Instruction{2, 8, RR_0x1b}
+    cpu.instructions[0x1c] = Instruction{2, 8, RR_0x1c}
+    cpu.instructions[0x1d] = Instruction{2, 8, RR_0x1d}
+    cpu.instructions[0x1e] = Instruction{2, 16, RR_0x1e}
+    cpu.instructions[0x1f] = Instruction{2, 8, RR_0x1f}
+    cpu.instructions[0x20] = Instruction{2, 8, SLA_0x20}
+    cpu.instructions[0x21] = Instruction{2, 8, SLA_0x21}
+    cpu.instructions[0x22] = Instruction{2, 8, SLA_0x22}
+    cpu.instructions[0x23] = Instruction{2, 8, SLA_0x23}
+    cpu.instructions[0x24] = Instruction{2, 8, SLA_0x24}
+    cpu.instructions[0x25] = Instruction{2, 8, SLA_0x25}
+    cpu.instructions[0x26] = Instruction{2, 16, SLA_0x26}
+    cpu.instructions[0x27] = Instruction{2, 8, SLA_0x27}
+    cpu.instructions[0x28] = Instruction{2, 8, SRA_0x28}
+    cpu.instructions[0x29] = Instruction{2, 8, SRA_0x29}
+    cpu.instructions[0x2a] = Instruction{2, 8, SRA_0x2a}
+    cpu.instructions[0x2b] = Instruction{2, 8, SRA_0x2b}
+    cpu.instructions[0x2c] = Instruction{2, 8, SRA_0x2c}
+    cpu.instructions[0x2d] = Instruction{2, 8, SRA_0x2d}
+    cpu.instructions[0x2e] = Instruction{2, 16, SRA_0x2e}
+    cpu.instructions[0x2f] = Instruction{2, 8, SRA_0x2f}
+    cpu.instructions[0x30] = Instruction{2, 8, SWAP_0x30}
+    cpu.instructions[0x31] = Instruction{2, 8, SWAP_0x31}
+    cpu.instructions[0x32] = Instruction{2, 8, SWAP_0x32}
+    cpu.instructions[0x33] = Instruction{2, 8, SWAP_0x33}
+    cpu.instructions[0x34] = Instruction{2, 8, SWAP_0x34}
+    cpu.instructions[0x35] = Instruction{2, 8, SWAP_0x35}
+    cpu.instructions[0x36] = Instruction{2, 16, SWAP_0x36}
+    cpu.instructions[0x37] = Instruction{2, 8, SWAP_0x37}
+    cpu.instructions[0x38] = Instruction{2, 8, SRL_0x38}
+    cpu.instructions[0x39] = Instruction{2, 8, SRL_0x39}
+    cpu.instructions[0x3a] = Instruction{2, 8, SRL_0x3a}
+    cpu.instructions[0x3b] = Instruction{2, 8, SRL_0x3b}
+    cpu.instructions[0x3c] = Instruction{2, 8, SRL_0x3c}
+    cpu.instructions[0x3d] = Instruction{2, 8, SRL_0x3d}
+    cpu.instructions[0x3e] = Instruction{2, 16, SRL_0x3e}
+    cpu.instructions[0x3f] = Instruction{2, 8, SRL_0x3f}
+    cpu.instructions[0x40] = Instruction{2, 8, BIT_0x40}
+    cpu.instructions[0x41] = Instruction{2, 8, BIT_0x41}
+    cpu.instructions[0x42] = Instruction{2, 8, BIT_0x42}
+    cpu.instructions[0x43] = Instruction{2, 8, BIT_0x43}
+    cpu.instructions[0x44] = Instruction{2, 8, BIT_0x44}
+    cpu.instructions[0x45] = Instruction{2, 8, BIT_0x45}
+    cpu.instructions[0x46] = Instruction{2, 16, BIT_0x46}
+    cpu.instructions[0x47] = Instruction{2, 8, BIT_0x47}
+    cpu.instructions[0x48] = Instruction{2, 8, BIT_0x48}
+    cpu.instructions[0x49] = Instruction{2, 8, BIT_0x49}
+    cpu.instructions[0x4a] = Instruction{2, 8, BIT_0x4a}
+    cpu.instructions[0x4b] = Instruction{2, 8, BIT_0x4b}
+    cpu.instructions[0x4c] = Instruction{2, 8, BIT_0x4c}
+    cpu.instructions[0x4d] = Instruction{2, 8, BIT_0x4d}
+    cpu.instructions[0x4e] = Instruction{2, 16, BIT_0x4e}
+    cpu.instructions[0x4f] = Instruction{2, 8, BIT_0x4f}
+    cpu.instructions[0x50] = Instruction{2, 8, BIT_0x50}
+    cpu.instructions[0x51] = Instruction{2, 8, BIT_0x51}
+    cpu.instructions[0x52] = Instruction{2, 8, BIT_0x52}
+    cpu.instructions[0x53] = Instruction{2, 8, BIT_0x53}
+    cpu.instructions[0x54] = Instruction{2, 8, BIT_0x54}
+    cpu.instructions[0x55] = Instruction{2, 8, BIT_0x55}
+    cpu.instructions[0x56] = Instruction{2, 16, BIT_0x56}
+    cpu.instructions[0x57] = Instruction{2, 8, BIT_0x57}
+    cpu.instructions[0x58] = Instruction{2, 8, BIT_0x58}
+    cpu.instructions[0x59] = Instruction{2, 8, BIT_0x59}
+    cpu.instructions[0x5a] = Instruction{2, 8, BIT_0x5a}
+    cpu.instructions[0x5b] = Instruction{2, 8, BIT_0x5b}
+    cpu.instructions[0x5c] = Instruction{2, 8, BIT_0x5c}
+    cpu.instructions[0x5d] = Instruction{2, 8, BIT_0x5d}
+    cpu.instructions[0x5e] = Instruction{2, 16, BIT_0x5e}
+    cpu.instructions[0x5f] = Instruction{2, 8, BIT_0x5f}
+    cpu.instructions[0x60] = Instruction{2, 8, BIT_0x60}
+    cpu.instructions[0x61] = Instruction{2, 8, BIT_0x61}
+    cpu.instructions[0x62] = Instruction{2, 8, BIT_0x62}
+    cpu.instructions[0x63] = Instruction{2, 8, BIT_0x63}
+    cpu.instructions[0x64] = Instruction{2, 8, BIT_0x64}
+    cpu.instructions[0x65] = Instruction{2, 8, BIT_0x65}
+    cpu.instructions[0x66] = Instruction{2, 16, BIT_0x66}
+    cpu.instructions[0x67] = Instruction{2, 8, BIT_0x67}
+    cpu.instructions[0x68] = Instruction{2, 8, BIT_0x68}
+    cpu.instructions[0x69] = Instruction{2, 8, BIT_0x69}
+    cpu.instructions[0x6a] = Instruction{2, 8, BIT_0x6a}
+    cpu.instructions[0x6b] = Instruction{2, 8, BIT_0x6b}
+    cpu.instructions[0x6c] = Instruction{2, 8, BIT_0x6c}
+    cpu.instructions[0x6d] = Instruction{2, 8, BIT_0x6d}
+    cpu.instructions[0x6e] = Instruction{2, 16, BIT_0x6e}
+    cpu.instructions[0x6f] = Instruction{2, 8, BIT_0x6f}
+    cpu.instructions[0x70] = Instruction{2, 8, BIT_0x70}
+    cpu.instructions[0x71] = Instruction{2, 8, BIT_0x71}
+    cpu.instructions[0x72] = Instruction{2, 8, BIT_0x72}
+    cpu.instructions[0x73] = Instruction{2, 8, BIT_0x73}
+    cpu.instructions[0x74] = Instruction{2, 8, BIT_0x74}
+    cpu.instructions[0x75] = Instruction{2, 8, BIT_0x75}
+    cpu.instructions[0x76] = Instruction{2, 16, BIT_0x76}
+    cpu.instructions[0x77] = Instruction{2, 8, BIT_0x77}
+    cpu.instructions[0x78] = Instruction{2, 8, BIT_0x78}
+    cpu.instructions[0x79] = Instruction{2, 8, BIT_0x79}
+    cpu.instructions[0x7a] = Instruction{2, 8, BIT_0x7a}
+    cpu.instructions[0x7b] = Instruction{2, 8, BIT_0x7b}
+    cpu.instructions[0x7c] = Instruction{2, 8, BIT_0x7c}
+    cpu.instructions[0x7d] = Instruction{2, 8, BIT_0x7d}
+    cpu.instructions[0x7e] = Instruction{2, 16, BIT_0x7e}
+    cpu.instructions[0x7f] = Instruction{2, 8, BIT_0x7f}
+    cpu.instructions[0x80] = Instruction{2, 8, RES_0x80}
+    cpu.instructions[0x81] = Instruction{2, 8, RES_0x81}
+    cpu.instructions[0x82] = Instruction{2, 8, RES_0x82}
+    cpu.instructions[0x83] = Instruction{2, 8, RES_0x83}
+    cpu.instructions[0x84] = Instruction{2, 8, RES_0x84}
+    cpu.instructions[0x85] = Instruction{2, 8, RES_0x85}
+    cpu.instructions[0x86] = Instruction{2, 16, RES_0x86}
+    cpu.instructions[0x87] = Instruction{2, 8, RES_0x87}
+    cpu.instructions[0x88] = Instruction{2, 8, RES_0x88}
+    cpu.instructions[0x89] = Instruction{2, 8, RES_0x89}
+    cpu.instructions[0x8a] = Instruction{2, 8, RES_0x8a}
+    cpu.instructions[0x8b] = Instruction{2, 8, RES_0x8b}
+    cpu.instructions[0x8c] = Instruction{2, 8, RES_0x8c}
+    cpu.instructions[0x8d] = Instruction{2, 8, RES_0x8d}
+    cpu.instructions[0x8e] = Instruction{2, 16, RES_0x8e}
+    cpu.instructions[0x8f] = Instruction{2, 8, RES_0x8f}
+    cpu.instructions[0x90] = Instruction{2, 8, RES_0x90}
+    cpu.instructions[0x91] = Instruction{2, 8, RES_0x91}
+    cpu.instructions[0x92] = Instruction{2, 8, RES_0x92}
+    cpu.instructions[0x93] = Instruction{2, 8, RES_0x93}
+    cpu.instructions[0x94] = Instruction{2, 8, RES_0x94}
+    cpu.instructions[0x95] = Instruction{2, 8, RES_0x95}
+    cpu.instructions[0x96] = Instruction{2, 16, RES_0x96}
+    cpu.instructions[0x97] = Instruction{2, 8, RES_0x97}
+    cpu.instructions[0x98] = Instruction{2, 8, RES_0x98}
+    cpu.instructions[0x99] = Instruction{2, 8, RES_0x99}
+    cpu.instructions[0x9a] = Instruction{2, 8, RES_0x9a}
+    cpu.instructions[0x9b] = Instruction{2, 8, RES_0x9b}
+    cpu.instructions[0x9c] = Instruction{2, 8, RES_0x9c}
+    cpu.instructions[0x9d] = Instruction{2, 8, RES_0x9d}
+    cpu.instructions[0x9e] = Instruction{2, 16, RES_0x9e}
+    cpu.instructions[0x9f] = Instruction{2, 8, RES_0x9f}
+    cpu.instructions[0xa0] = Instruction{2, 8, RES_0xa0}
+    cpu.instructions[0xa1] = Instruction{2, 8, RES_0xa1}
+    cpu.instructions[0xa2] = Instruction{2, 8, RES_0xa2}
+    cpu.instructions[0xa3] = Instruction{2, 8, RES_0xa3}
+    cpu.instructions[0xa4] = Instruction{2, 8, RES_0xa4}
+    cpu.instructions[0xa5] = Instruction{2, 8, RES_0xa5}
+    cpu.instructions[0xa6] = Instruction{2, 16, RES_0xa6}
+    cpu.instructions[0xa7] = Instruction{2, 8, RES_0xa7}
+    cpu.instructions[0xa8] = Instruction{2, 8, RES_0xa8}
+    cpu.instructions[0xa9] = Instruction{2, 8, RES_0xa9}
+    cpu.instructions[0xaa] = Instruction{2, 8, RES_0xaa}
+    cpu.instructions[0xab] = Instruction{2, 8, RES_0xab}
+    cpu.instructions[0xac] = Instruction{2, 8, RES_0xac}
+    cpu.instructions[0xad] = Instruction{2, 8, RES_0xad}
+    cpu.instructions[0xae] = Instruction{2, 16, RES_0xae}
+    cpu.instructions[0xaf] = Instruction{2, 8, RES_0xaf}
+    cpu.instructions[0xb0] = Instruction{2, 8, RES_0xb0}
+    cpu.instructions[0xb1] = Instruction{2, 8, RES_0xb1}
+    cpu.instructions[0xb2] = Instruction{2, 8, RES_0xb2}
+    cpu.instructions[0xb3] = Instruction{2, 8, RES_0xb3}
+    cpu.instructions[0xb4] = Instruction{2, 8, RES_0xb4}
+    cpu.instructions[0xb5] = Instruction{2, 8, RES_0xb5}
+    cpu.instructions[0xb6] = Instruction{2, 16, RES_0xb6}
+    cpu.instructions[0xb7] = Instruction{2, 8, RES_0xb7}
+    cpu.instructions[0xb8] = Instruction{2, 8, RES_0xb8}
+    cpu.instructions[0xb9] = Instruction{2, 8, RES_0xb9}
+    cpu.instructions[0xba] = Instruction{2, 8, RES_0xba}
+    cpu.instructions[0xbb] = Instruction{2, 8, RES_0xbb}
+    cpu.instructions[0xbc] = Instruction{2, 8, RES_0xbc}
+    cpu.instructions[0xbd] = Instruction{2, 8, RES_0xbd}
+    cpu.instructions[0xbe] = Instruction{2, 16, RES_0xbe}
+    cpu.instructions[0xbf] = Instruction{2, 8, RES_0xbf}
+    cpu.instructions[0xc0] = Instruction{2, 8, SET_0xc0}
+    cpu.instructions[0xc1] = Instruction{2, 8, SET_0xc1}
+    cpu.instructions[0xc2] = Instruction{2, 8, SET_0xc2}
+    cpu.instructions[0xc3] = Instruction{2, 8, SET_0xc3}
+    cpu.instructions[0xc4] = Instruction{2, 8, SET_0xc4}
+    cpu.instructions[0xc5] = Instruction{2, 8, SET_0xc5}
+    cpu.instructions[0xc6] = Instruction{2, 16, SET_0xc6}
+    cpu.instructions[0xc7] = Instruction{2, 8, SET_0xc7}
+    cpu.instructions[0xc8] = Instruction{2, 8, SET_0xc8}
+    cpu.instructions[0xc9] = Instruction{2, 8, SET_0xc9}
+    cpu.instructions[0xca] = Instruction{2, 8, SET_0xca}
+    cpu.instructions[0xcb] = Instruction{2, 8, SET_0xcb}
+    cpu.instructions[0xcc] = Instruction{2, 8, SET_0xcc}
+    cpu.instructions[0xcd] = Instruction{2, 8, SET_0xcd}
+    cpu.instructions[0xce] = Instruction{2, 16, SET_0xce}
+    cpu.instructions[0xcf] = Instruction{2, 8, SET_0xcf}
+    cpu.instructions[0xd0] = Instruction{2, 8, SET_0xd0}
+    cpu.instructions[0xd1] = Instruction{2, 8, SET_0xd1}
+    cpu.instructions[0xd2] = Instruction{2, 8, SET_0xd2}
+    cpu.instructions[0xd3] = Instruction{2, 8, SET_0xd3}
+    cpu.instructions[0xd4] = Instruction{2, 8, SET_0xd4}
+    cpu.instructions[0xd5] = Instruction{2, 8, SET_0xd5}
+    cpu.instructions[0xd6] = Instruction{2, 16, SET_0xd6}
+    cpu.instructions[0xd7] = Instruction{2, 8, SET_0xd7}
+    cpu.instructions[0xd8] = Instruction{2, 8, SET_0xd8}
+    cpu.instructions[0xd9] = Instruction{2, 8, SET_0xd9}
+    cpu.instructions[0xda] = Instruction{2, 8, SET_0xda}
+    cpu.instructions[0xdb] = Instruction{2, 8, SET_0xdb}
+    cpu.instructions[0xdc] = Instruction{2, 8, SET_0xdc}
+    cpu.instructions[0xdd] = Instruction{2, 8, SET_0xdd}
+    cpu.instructions[0xde] = Instruction{2, 16, SET_0xde}
+    cpu.instructions[0xdf] = Instruction{2, 8, SET_0xdf}
+    cpu.instructions[0xe0] = Instruction{2, 8, SET_0xe0}
+    cpu.instructions[0xe1] = Instruction{2, 8, SET_0xe1}
+    cpu.instructions[0xe2] = Instruction{2, 8, SET_0xe2}
+    cpu.instructions[0xe3] = Instruction{2, 8, SET_0xe3}
+    cpu.instructions[0xe4] = Instruction{2, 8, SET_0xe4}
+    cpu.instructions[0xe5] = Instruction{2, 8, SET_0xe5}
+    cpu.instructions[0xe6] = Instruction{2, 16, SET_0xe6}
+    cpu.instructions[0xe7] = Instruction{2, 8, SET_0xe7}
+    cpu.instructions[0xe8] = Instruction{2, 8, SET_0xe8}
+    cpu.instructions[0xe9] = Instruction{2, 8, SET_0xe9}
+    cpu.instructions[0xea] = Instruction{2, 8, SET_0xea}
+    cpu.instructions[0xeb] = Instruction{2, 8, SET_0xeb}
+    cpu.instructions[0xec] = Instruction{2, 8, SET_0xec}
+    cpu.instructions[0xed] = Instruction{2, 8, SET_0xed}
+    cpu.instructions[0xee] = Instruction{2, 16, SET_0xee}
+    cpu.instructions[0xef] = Instruction{2, 8, SET_0xef}
+    cpu.instructions[0xf0] = Instruction{2, 8, SET_0xf0}
+    cpu.instructions[0xf1] = Instruction{2, 8, SET_0xf1}
+    cpu.instructions[0xf2] = Instruction{2, 8, SET_0xf2}
+    cpu.instructions[0xf3] = Instruction{2, 8, SET_0xf3}
+    cpu.instructions[0xf4] = Instruction{2, 8, SET_0xf4}
+    cpu.instructions[0xf5] = Instruction{2, 8, SET_0xf5}
+    cpu.instructions[0xf6] = Instruction{2, 16, SET_0xf6}
+    cpu.instructions[0xf7] = Instruction{2, 8, SET_0xf7}
+    cpu.instructions[0xf8] = Instruction{2, 8, SET_0xf8}
+    cpu.instructions[0xf9] = Instruction{2, 8, SET_0xf9}
+    cpu.instructions[0xfa] = Instruction{2, 8, SET_0xfa}
+    cpu.instructions[0xfb] = Instruction{2, 8, SET_0xfb}
+    cpu.instructions[0xfc] = Instruction{2, 8, SET_0xfc}
+    cpu.instructions[0xfd] = Instruction{2, 8, SET_0xfd}
+    cpu.instructions[0xfe] = Instruction{2, 16, SET_0xfe}
+    cpu.instructions[0xff] = Instruction{2, 8, SET_0xff}
 }
