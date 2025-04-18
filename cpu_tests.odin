@@ -424,6 +424,8 @@ interrupts :: proc(t: ^testing.T) {
     mem: [0xFFFF+1]u8
 
     cpu_init(&cpu)
+
+    cpu.sp = 0xFFFE
     mem[0xFFFF] = 0xFF // IE = 0xFF, allow all interrupts
 
     // bunch of NOPs
@@ -463,15 +465,19 @@ interrupts :: proc(t: ^testing.T) {
 
     // done executing interrupt
     testing.expect_value(t, cpu.state, CpuState.Fetch)
+    testing.expect_value(t, cpu.ime, false)
     testing.expect_value(t, cpu.pc, 0x40)
 
     // execute instruction at handler's address (RETI)
-    // RETI executes a RET and reenable interrupts
+    // RETI executes a RET and reenables interrupts
+
     run_cpu(&cpu, mem[:], 16)
 
-    testing.expect_value(t, cpu.ime, true)
     testing.expect_value(t, cpu.state, CpuState.Fetch)
     testing.expect_value(t, cpu.pc, pc_before_interreupt)
+    testing.expect_value(t, cpu.ime, true)
+    testing.expect(t, mem[0xFF0F] & (1 << u8(Interrupt.VBlank)) == 0)
+    testing.expect(t, mem[0xFF0F] & (1 << u8(Interrupt.Joypad)) > 0)
 
     run_cpu(&cpu, mem[:], 21)
 
