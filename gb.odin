@@ -4,7 +4,7 @@ import "core:time"
 import "core:log"
 import "core:os"
 import "core:mem"
-import "vendor:raylib"
+import rl "vendor:raylib"
 
 DotNs: i64 = 238 // 1 dot = 2^22 Hz, 1 dot = 1 T-Cycle, 1 M-Cycle = 4 T-Cycle
 ScanelineDots :: 456
@@ -12,6 +12,8 @@ FrameScanlines :: 154
 FrameDrawScanlines :: 144
 FrameDots: i64 = ScanelineDots * FrameScanlines
 FrameNs: i64 = FrameDots * DotNs
+ScreenWidth :: 160
+ScreenHeight :: 144
 BootRomPath :: "ROMS/dmg_boot.gb"
 
 GB :: struct {
@@ -48,19 +50,32 @@ gb_init :: proc(gb: ^GB) {
 }
 
 gb_run :: proc(gb: ^GB) {
-    for !raylib.WindowShouldClose() {
+    screen_texture := rl.LoadRenderTexture(ScreenWidth, ScreenHeight)
+    screen_rect := rl.Rectangle{0, 0, ScreenWidth, ScreenHeight}
+    target_rect := rl.Rectangle{0, 0, f32(rl.GetScreenWidth()), f32(rl.GetScreenHeight())}
+
+    for !rl.WindowShouldClose() {
         if !gb.booted && gb.mem[0xFF50] != 0 {
             // TODO: unload boot rom?
             gb.booted = true
-            log.debug("BOOTED: %x", gb.cpu.sp)
+            log.debug("BOOTED")
         }
 
         do_frame(gb)
 
-        raylib.BeginDrawing()
-        raylib.ClearBackground(raylib.LIGHTGRAY)
-        raylib.EndDrawing()
+        rl.UpdateTexture(screen_texture.texture, raw_data(gb.ppu.framebuffer[:]))
+
+        rl.BeginDrawing()
+        {
+            rl.ClearBackground(rl.LIGHTGRAY)
+
+            rl.DrawTexturePro(screen_texture.texture, screen_rect, target_rect, rl.Vector2{0, 0}, 0, rl.WHITE)
+            rl.DrawFPS(0, 0) 
+        }
+        rl.EndDrawing()
     }
+
+    rl.UnloadTexture(screen_texture.texture)
 }
 
 gb_load_boot_rom :: proc(gb: ^GB) -> GB_Error {
@@ -92,7 +107,7 @@ gb_load_rom :: proc(gb: ^GB, path: string) -> GB_Error {
 
     header := read_rom_header(data)
 
-    if header.rom_type == 0 {
+    if header.rom_type > 1 {
         copy(gb.mem[:], data)
     } else {
         panic("unsupported ROM type")

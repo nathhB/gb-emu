@@ -74,7 +74,7 @@ print_cpu :: proc(cpu: ^CPU) {
     c := int(read_flag(cpu, Flags.C))
     ime := int(cpu.ime)
 
-    // log.debugf("AF: %x, BC: %x, DE: %x, HL: %x | Z: %d, H: %d, N: %d, C: %d | IME: %d", cpu.af, cpu.bc, cpu.de, cpu.hl, z, h, n, c, ime)
+    log.debugf("AF: %x, BC: %x, DE: %x, HL: %x | Z: %d, H: %d, N: %d, C: %d | IME: %d", cpu.af, cpu.bc, cpu.de, cpu.hl, z, h, n, c, ime)
 }
 
 do_fetch_state :: proc(cpu: ^CPU, mem: []u8) {
