@@ -7,7 +7,9 @@ Flags :: enum { Z, N, H, C }
 // enum order matters: from highest to lowest priority
 Interrupt :: enum { VBlank, LCD, Timer, Serial, Joypad }
 
-CpuState :: enum { Fetch, ExecuteInstruction, ExecuteInterrupt }
+CPU_State :: enum { Fetch, ExecuteInstruction, ExecuteInterrupt }
+
+Breakpoint_Proc :: proc(cpu: ^CPU, mem: ^GB_Memory)
 
 CPU :: struct {
     af: u16,
@@ -20,11 +22,13 @@ CPU :: struct {
     instructions: [0xFF+1]Instruction,
     prefixed_instructions: [0xFF+1]Instruction,
     interrupt_handlers: [5]u16,
-    state: CpuState,
+    state: CPU_State,
     exec_op: u8,
     exec_cyles: int,
     prefix: bool,
     enable_interrupts: bool,
+    breakpoints: map[u16]Breakpoint_Proc,
+    breakpoint: u16
 
 }
 
@@ -32,7 +36,7 @@ Instruction :: struct {
     len: int,
     cycles: int,
     mnemonic: string,
-    func: proc(cpu: ^CPU, mem: []u8, data: u16)
+    func: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16)
 }
 
 cpu_init :: proc(cpu: ^CPU) {
@@ -45,44 +49,61 @@ cpu_init :: proc(cpu: ^CPU) {
     cpu.interrupt_handlers[Interrupt.Serial] = 0x58
     cpu.interrupt_handlers[Interrupt.Joypad] = 0x60
 
-    cpu.state = CpuState.Fetch
+    cpu.state = CPU_State.Fetch
     cpu.pc = 0
     cpu.sp = 0
+    cpu.ime = false
 }
 
-cpu_tick :: proc(cpu: ^CPU, mem: []u8) {
+cpu_tick :: proc(cpu: ^CPU, mem: ^GB_Memory) {
+    bp, bp_proc := check_breakpoints(cpu)
+
+    if bp {
+        log.debugf("Hit breakpoint at %x", cpu.pc)
+        print_cpu(cpu)
+        bp_proc(cpu, mem)
+        cpu.breakpoint = cpu.pc
+
+        return
+    }
+
     switch cpu.state {
-    case CpuState.Fetch:
+    case CPU_State.Fetch:
         do_fetch_state(cpu, mem)
-    case CpuState.ExecuteInstruction:
-        do_execute_instruction_state(cpu, mem)
-    case CpuState.ExecuteInterrupt:
-        do_execute_interrupt_state(cpu, mem)
+    case CPU_State.ExecuteInstruction:
+        do_execute_instruction_state(cpu)
+    case CPU_State.ExecuteInterrupt:
+        do_execute_interrupt_state(cpu)
     }
 }
 
-cpu_request_interrupt :: proc(cpu: ^CPU, mem: []u8, interrupt: Interrupt) {
-    i_f := &mem[0xFF0F]
+cpu_request_interrupt :: proc(cpu: ^CPU, mem: ^GB_Memory, interrupt: Interrupt) {
+    i_f := mem_read(mem, u16(GB_HardRegister.IF))
 
-    i_f^ |= (1 << u8(interrupt))
+    i_f |= (1 << u8(interrupt))
+    mem_write(mem, u16(GB_HardRegister.IF), i_f)
 }
 
-print_cpu :: proc(cpu: ^CPU) {
-    z := int(read_flag(cpu, Flags.Z))
-    h := int(read_flag(cpu, Flags.H))
-    n := int(read_flag(cpu, Flags.N))
-    c := int(read_flag(cpu, Flags.C))
-    ime := int(cpu.ime)
-
-    log.debugf("AF: %x, BC: %x, DE: %x, HL: %x | Z: %d, H: %d, N: %d, C: %d | IME: %d", cpu.af, cpu.bc, cpu.de, cpu.hl, z, h, n, c, ime)
+cpu_add_breakpoint :: proc(cpu: ^CPU, addr: u16, bp_proc: Breakpoint_Proc) {
+    cpu.breakpoints[addr] = bp_proc
 }
 
-do_fetch_state :: proc(cpu: ^CPU, mem: []u8) {
+check_breakpoints :: proc(cpu: ^CPU) -> (bool, Breakpoint_Proc) {
+    bp_proc, exist := cpu.breakpoints[cpu.pc]
+
+    if exist {
+        return true, bp_proc
+    }
+
+    return false, nil
+}
+
+do_fetch_state :: proc(cpu: ^CPU, mem: ^GB_Memory) {
     if check_interrupts(cpu, mem) {
         return
     }
 
-    op := mem[cpu.pc]
+    op := mem_read(mem, cpu.pc)
     op_pc := cpu.pc
     instructions := cpu.prefix ? cpu.prefixed_instructions[:] : cpu.instructions[:]
     instruction := instructions[op]
@@ -104,10 +125,10 @@ do_fetch_state :: proc(cpu: ^CPU, mem: []u8) {
     // log.debugf("0x%x - %s (0x%x) 0x%x (SP: %d)", op_pc, instruction.mnemonic, op, data, cpu.sp)
     instruction.func(cpu, mem, data)
     cpu.exec_cyles = instruction.cycles - 1
-    cpu.state = CpuState.ExecuteInstruction
+    cpu.state = CPU_State.ExecuteInstruction
 }
 
-do_execute_instruction_state :: proc(cpu: ^CPU, mem: []u8) {
+do_execute_instruction_state :: proc(cpu: ^CPU) {
     cpu.exec_cyles -= 1
 
     if (cpu.exec_cyles > 0) {
@@ -127,34 +148,34 @@ do_execute_instruction_state :: proc(cpu: ^CPU, mem: []u8) {
         cpu.enable_interrupts = true
     }
 
-    cpu.state = CpuState.Fetch
+    cpu.state = CPU_State.Fetch
 }
 
-do_execute_interrupt_state :: proc(cpu: ^CPU, mem: []u8) {
+do_execute_interrupt_state :: proc(cpu: ^CPU) {
     cpu.exec_cyles -= 1
 
     if (cpu.exec_cyles > 0) {
         return
     }
 
-    cpu.state = CpuState.Fetch
+    cpu.state = CPU_State.Fetch
 }
 
-fetch :: proc(cpu: ^CPU, mem: []u8, len: int) -> u16 {
+fetch :: proc(cpu: ^CPU, mem: ^GB_Memory, len: int) -> u16 {
     assert(len == 1 || len == 2)
 
-    data := u16(mem[cpu.pc])
+    data := u16(mem_read(mem, cpu.pc))
 
     if len == 2 {
-        data |= (u16(mem[cpu.pc + 1]) << 8)
+        data |= (u16(mem_read(mem, cpu.pc + 1)) << 8)
     }
 
     return data
 }
 
-check_interrupts :: proc(cpu: ^CPU, mem: []u8) -> bool {
-    i_e := mem[0xFFFF]
-    i_f := mem[0xFF0F]
+check_interrupts :: proc(cpu: ^CPU, mem: ^GB_Memory) -> bool {
+    i_e := mem_read(mem, u16(GB_HardRegister.IE))
+    i_f := mem_read(mem, u16(GB_HardRegister.IF))
 
     if (!cpu.ime) {
         return false
@@ -171,21 +192,22 @@ check_interrupts :: proc(cpu: ^CPU, mem: []u8) -> bool {
     return false
 }
 
-check_interrupt :: proc(cpu: ^CPU, mem: []u8, interrupt: Interrupt) -> bool {
-    i_e := mem[0xFFFF]
-    i_f := mem[0xFF0F]
+check_interrupt :: proc(cpu: ^CPU, mem: ^GB_Memory, interrupt: Interrupt) -> bool {
+    i_e := mem_read(mem, u16(GB_HardRegister.IE))
+    i_f := mem_read(mem, u16(GB_HardRegister.IF))
     interrupt_mask := u8(1) << u8(interrupt)
 
     return (i_e & interrupt_mask) > 0 && (i_f & interrupt_mask) > 0
 }
 
-execute_interrupt :: proc(cpu: ^CPU, mem: []u8, interrupt: Interrupt) {
-    i_f := &mem[0xFF0F]
+execute_interrupt :: proc(cpu: ^CPU, mem: ^GB_Memory, interrupt: Interrupt) {
+    i_f := mem_read(mem, u16(GB_HardRegister.IF))
+    i_f &= ~(1 << u8(interrupt))
 
-    i_f^ &= ~(1 << u8(interrupt))
+    mem_write(mem, u16(GB_HardRegister.IF), i_f)
     call(cpu, mem, cpu.interrupt_handlers[interrupt])
     cpu.ime = false
-    cpu.state = CpuState.ExecuteInterrupt
+    cpu.state = CPU_State.ExecuteInterrupt
     cpu.exec_cyles = 5 * 4 // interrupt handle takes 5 M-cycles
 }
 
@@ -217,10 +239,13 @@ write_flag :: proc(cpu: ^CPU, flag: Flags, value: bool) {
 }
 
 read_flag :: proc(cpu: ^CPU, flag: Flags) -> bool {
-    flags := read_register_low(cpu.af)
+    return read_flag_from_byte(read_register_low(cpu.af), flag)
+}
+
+read_flag_from_byte :: proc(byte: u8, flag: Flags) -> bool {
     mask := u8(1 << (7 - uint(flag)))
 
-    return (flags & mask) > 0
+    return (byte & mask) > 0
 }
 
 inc_register_high :: proc(cpu: ^CPU, reg: ^u16) {
@@ -425,45 +450,48 @@ cp_bytes :: proc(cpu: ^CPU, byteA: u8, byteB: u8) {
     write_flag(cpu, Flags.H, hc)
 }
 
-copy_to_ram :: proc { copy_to_ram_n8, copy_to_ram_n16 }
+write_to_ram :: proc { write_to_ram_n8, write_to_ram_n16 }
 
-copy_to_ram_n8 :: proc(mem: []u8, addr: u16, value: u8) {
-    mem[addr] = value
+write_to_ram_n8 :: proc(mem: ^GB_Memory, addr: u16, value: u8) {
+    mem_write(mem, addr, value)
 }
 
-copy_to_ram_n16 :: proc(mem: []u8, addr: u16, value: u16) {
-    mem[addr] = u8(value & 0xFF)
-    mem[addr + 1] = u8((value & 0xFF00) >> 8)
+write_to_ram_n16 :: proc(mem: ^GB_Memory, addr: u16, value: u16) {
+    low_byte := u8(value & 0xFF)
+    high_byte := u8((value & 0xFF00) >> 8)
+
+    mem_write(mem, addr, low_byte)
+    mem_write(mem, addr + 1, high_byte)
 }
 
-copy_to_high_ram :: proc(mem: []u8, addr: u8, value: u8) {
-    mem[0xFF00 + u16(addr)] = value
+write_to_high_ram :: proc(mem: ^GB_Memory, addr: u8, value: u8) {
+    mem_write(mem, 0xFF00 + u16(addr), value)
 }
 
 jr :: proc(cpu: ^CPU, offset: i8) {
     cpu.pc = u16(int(cpu.pc) + int(offset))
 }
 
-push_register :: proc(cpu: ^CPU, mem: []u8, reg: u16) {
+push_register :: proc(cpu: ^CPU, mem: ^GB_Memory, reg: u16) {
     cpu.sp -= 1
-    mem[cpu.sp] = read_register_high(reg)
+    mem_write(mem, cpu.sp, read_register_high(reg))
     cpu.sp -= 1
-    mem[cpu.sp] = read_register_low(reg)
+    mem_write(mem, cpu.sp, read_register_low(reg))
 }
 
-pop_register :: proc(cpu: ^CPU, mem: []u8, reg: ^u16) {
-    write_register_low(reg, mem[cpu.sp])
+pop_register :: proc(cpu: ^CPU, mem: ^GB_Memory, reg: ^u16) {
+    write_register_low(reg, mem_read(mem, cpu.sp))
     cpu.sp += 1
-    write_register_high(reg, mem[cpu.sp])
+    write_register_high(reg, mem_read(mem, cpu.sp))
     cpu.sp += 1
 }
 
-call :: proc(cpu: ^CPU, mem: []u8, addr: u16) {
+call :: proc(cpu: ^CPU, mem: ^GB_Memory, addr: u16) {
     push_register(cpu, mem, cpu.pc)
     cpu.pc = addr
 }
 
-ret :: proc(cpu: ^CPU, mem: []u8) {
+ret :: proc(cpu: ^CPU, mem: ^GB_Memory) {
     pop_register(cpu, mem, &cpu.pc)
 }
 
@@ -725,7 +753,7 @@ set :: proc(cpu: ^CPU, byte: ^u8, b: u8) {
    Cycles: 4
    Flags: - - - -
  */
-NOP_0x00 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+NOP_0x00 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
 }
 
 /*
@@ -734,7 +762,7 @@ NOP_0x00 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-STOP_0x10 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+STOP_0x10 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     // TODO
 }
 
@@ -744,7 +772,7 @@ STOP_0x10 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-HALT_0x76 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+HALT_0x76 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     // TODO
 }
 
@@ -754,7 +782,7 @@ HALT_0x76 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-PREFIX_0xcb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+PREFIX_0xcb :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cpu.prefix = true
 }
 
@@ -764,7 +792,7 @@ PREFIX_0xcb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-DI_0xf3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+DI_0xf3 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cpu.ime = false
 }
 
@@ -774,7 +802,7 @@ DI_0xf3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-EI_0xfb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+EI_0xfb :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     // see the 'do_execute_instruction_state' function
 }
 
@@ -786,7 +814,7 @@ EI_0xfb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: - - - -
  */
-LD_0x01 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x01 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cpu.bc = data
 }
 
@@ -796,8 +824,8 @@ LD_0x01 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 20
    Flags: - - - -
  */
-LD_0x08 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    copy_to_ram(mem, data, cpu.sp)
+LD_0x08 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    write_to_ram(mem, data, cpu.sp)
 }
 
 /*
@@ -806,7 +834,7 @@ LD_0x08 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: - - - -
  */
-LD_0x11 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x11 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cpu.de = data
 }
 
@@ -816,7 +844,7 @@ LD_0x11 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: - - - -
  */
-LD_0x21 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x21 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cpu.hl = data
 }
 
@@ -826,7 +854,7 @@ LD_0x21 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: - - - -
  */
-LD_0x31 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x31 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cpu.sp = data
 }
 
@@ -836,7 +864,7 @@ LD_0x31 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: - - - -
  */
-POP_0xc1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+POP_0xc1 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     pop_register(cpu, mem, &cpu.bc)
 }
 
@@ -846,7 +874,7 @@ POP_0xc1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-PUSH_0xc5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+PUSH_0xc5 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     push_register(cpu, mem, cpu.bc)
 }
 
@@ -856,7 +884,7 @@ PUSH_0xc5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: - - - -
  */
-POP_0xd1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+POP_0xd1 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     pop_register(cpu, mem, &cpu.de)
 }
 
@@ -866,7 +894,7 @@ POP_0xd1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-PUSH_0xd5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+PUSH_0xd5 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     push_register(cpu, mem, cpu.de)
 }
 
@@ -876,7 +904,7 @@ PUSH_0xd5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: - - - -
  */
-POP_0xe1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+POP_0xe1 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     pop_register(cpu, mem, &cpu.hl)
 }
 
@@ -886,7 +914,7 @@ POP_0xe1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-PUSH_0xe5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+PUSH_0xe5 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     push_register(cpu, mem, cpu.hl)
 }
 
@@ -896,7 +924,7 @@ PUSH_0xe5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: Z N H C
  */
-POP_0xf1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+POP_0xf1 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     pop_register(cpu, mem, &cpu.af)
 }
 
@@ -906,7 +934,7 @@ POP_0xf1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-PUSH_0xf5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+PUSH_0xf5 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     push_register(cpu, mem, cpu.af)
 }
 
@@ -916,7 +944,7 @@ PUSH_0xf5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: 0 0 H C
  */
-LD_0xf8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0xf8 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     c := int(cpu.sp) + int(data) > 0xFFFF
     hc := (((cpu.sp & 0xFFF) + (data & 0xFFF)) & 0x1000) == 0x1000
 
@@ -934,7 +962,7 @@ LD_0xf8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0xf9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0xf9 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cpu.sp = cpu.hl
 }
 
@@ -946,8 +974,8 @@ LD_0xf9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x02 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    mem[cpu.bc] = read_register_high(cpu.af)
+LD_0x02 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    mem_write(mem, cpu.bc, read_register_high(cpu.af))
 }
 
 /*
@@ -956,7 +984,7 @@ LD_0x02 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x06 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x06 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.bc, u8(data))
 }
 
@@ -966,8 +994,8 @@ LD_0x06 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x0a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    write_register_high(&cpu.af, mem[cpu.bc])
+LD_0x0a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    write_register_high(&cpu.af, mem_read(mem, cpu.bc))
 }
 
 /*
@@ -976,7 +1004,7 @@ LD_0x0a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x0e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x0e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.bc, u8(data))
 }
 
@@ -986,8 +1014,8 @@ LD_0x0e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x12 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    mem[cpu.de] = read_register_high(cpu.af)
+LD_0x12 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    mem_write(mem, cpu.de, read_register_high(cpu.af))
 }
 
 /*
@@ -996,7 +1024,7 @@ LD_0x12 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x16 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x16 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.de, u8(data))
 }
 
@@ -1006,8 +1034,8 @@ LD_0x16 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x1a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    write_register_high(&cpu.af, mem[cpu.de])
+LD_0x1a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    write_register_high(&cpu.af, mem_read(mem, cpu.de))
 }
 
 /*
@@ -1016,7 +1044,7 @@ LD_0x1a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x1e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x1e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.de, u8(data))
 }
 
@@ -1026,8 +1054,8 @@ LD_0x1e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x22 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    mem[cpu.hl] = read_register_high(cpu.af)
+LD_0x22 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    mem_write(mem, cpu.hl, read_register_high(cpu.af))
     cpu.hl += 1
 }
 
@@ -1037,7 +1065,7 @@ LD_0x22 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x26 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x26 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.hl, u8(data))
 }
 
@@ -1047,8 +1075,8 @@ LD_0x26 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x2a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    write_register_high(&cpu.af, mem[cpu.hl])
+LD_0x2a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    write_register_high(&cpu.af, mem_read(mem, cpu.hl))
     cpu.hl += 1
 }
 
@@ -1058,7 +1086,7 @@ LD_0x2a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x2e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x2e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.hl, u8(data))
 }
 
@@ -1068,8 +1096,8 @@ LD_0x2e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x32 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    mem[cpu.hl] = read_register_high(cpu.af)
+LD_0x32 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    mem_write(mem, cpu.hl, read_register_high(cpu.af))
     cpu.hl -= 1
 }
 
@@ -1079,8 +1107,8 @@ LD_0x32 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: - - - -
  */
-LD_0x36 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    mem[cpu.hl] = u8(data)
+LD_0x36 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    mem_write(mem, cpu.hl, u8(data))
 }
 
 /*
@@ -1089,8 +1117,8 @@ LD_0x36 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x3a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    write_register_high(&cpu.af, mem[cpu.hl])
+LD_0x3a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    write_register_high(&cpu.af, mem_read(mem, cpu.hl))
     cpu.hl -= 1
 }
 
@@ -1100,7 +1128,7 @@ LD_0x3a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x3e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x3e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.af, u8(data))
 }
 
@@ -1110,7 +1138,7 @@ LD_0x3e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x40 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x40 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.bc, read_register_high(cpu.bc))
 }
 
@@ -1120,7 +1148,7 @@ LD_0x40 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x41 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x41 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.bc, read_register_low(cpu.bc))
 }
 
@@ -1130,7 +1158,7 @@ LD_0x41 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x42 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x42 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.bc, read_register_high(cpu.de))
 }
 
@@ -1140,7 +1168,7 @@ LD_0x42 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x43 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x43 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.bc, read_register_low(cpu.de))
 }
 
@@ -1150,7 +1178,7 @@ LD_0x43 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x44 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x44 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.bc, read_register_high(cpu.hl))
 }
 
@@ -1160,7 +1188,7 @@ LD_0x44 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x45 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x45 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.bc, read_register_low(cpu.hl))
 }
 
@@ -1170,8 +1198,8 @@ LD_0x45 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x46 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    write_register_high(&cpu.bc, mem[cpu.hl])
+LD_0x46 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    write_register_high(&cpu.bc, mem_read(mem, cpu.hl))
 }
 
 /*
@@ -1180,7 +1208,7 @@ LD_0x46 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x47 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x47 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.bc, read_register_high(cpu.af))
 }
 
@@ -1190,7 +1218,7 @@ LD_0x47 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x48 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x48 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.bc, read_register_high(cpu.bc))
 }
 
@@ -1200,7 +1228,7 @@ LD_0x48 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x49 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x49 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.bc, read_register_low(cpu.bc))
 }
 
@@ -1210,7 +1238,7 @@ LD_0x49 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x4a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x4a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.bc, read_register_high(cpu.de))
 }
 
@@ -1220,7 +1248,7 @@ LD_0x4a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x4b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x4b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.bc, read_register_low(cpu.de))
 }
 
@@ -1230,7 +1258,7 @@ LD_0x4b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x4c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x4c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.bc, read_register_high(cpu.hl))
 }
 
@@ -1240,7 +1268,7 @@ LD_0x4c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x4d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x4d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.bc, read_register_low(cpu.hl))
 }
 
@@ -1250,8 +1278,8 @@ LD_0x4d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x4e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    write_register_low(&cpu.bc, mem[cpu.hl])
+LD_0x4e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    write_register_low(&cpu.bc, mem_read(mem, cpu.hl))
 }
 
 /*
@@ -1260,7 +1288,7 @@ LD_0x4e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x4f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x4f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.bc, read_register_high(cpu.af))
 }
 
@@ -1270,7 +1298,7 @@ LD_0x4f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x50 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x50 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.de, read_register_high(cpu.bc))
 }
 
@@ -1280,7 +1308,7 @@ LD_0x50 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x51 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x51 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.de, read_register_low(cpu.bc))
 }
 
@@ -1290,7 +1318,7 @@ LD_0x51 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x52 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x52 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.de, read_register_high(cpu.de))
 }
 
@@ -1300,7 +1328,7 @@ LD_0x52 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x53 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x53 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.de, read_register_low(cpu.de))
 }
 
@@ -1310,7 +1338,7 @@ LD_0x53 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x54 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x54 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.de, read_register_high(cpu.hl))
 }
 
@@ -1320,7 +1348,7 @@ LD_0x54 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x55 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x55 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.de, read_register_low(cpu.hl))
 }
 
@@ -1330,8 +1358,8 @@ LD_0x55 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x56 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    write_register_high(&cpu.de, mem[cpu.hl])
+LD_0x56 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    write_register_high(&cpu.de, mem_read(mem, cpu.hl))
 }
 
 /*
@@ -1340,7 +1368,7 @@ LD_0x56 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x57 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x57 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.de, read_register_high(cpu.af))
 }
 
@@ -1350,7 +1378,7 @@ LD_0x57 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x58 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x58 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.de, read_register_high(cpu.bc))
 }
 
@@ -1360,7 +1388,7 @@ LD_0x58 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x59 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x59 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.de, read_register_low(cpu.bc))
 }
 
@@ -1370,7 +1398,7 @@ LD_0x59 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x5a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x5a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.de, read_register_high(cpu.de))
 }
 
@@ -1380,7 +1408,7 @@ LD_0x5a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x5b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x5b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.de, read_register_low(cpu.de))
 }
 
@@ -1390,7 +1418,7 @@ LD_0x5b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x5c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x5c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.de, read_register_high(cpu.hl))
 }
 
@@ -1400,7 +1428,7 @@ LD_0x5c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x5d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x5d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.de, read_register_low(cpu.hl))
 }
 
@@ -1410,8 +1438,8 @@ LD_0x5d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x5e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    write_register_low(&cpu.de, mem[cpu.hl])
+LD_0x5e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    write_register_low(&cpu.de, mem_read(mem, cpu.hl))
 }
 
 /*
@@ -1420,7 +1448,7 @@ LD_0x5e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x5f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x5f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.de, read_register_high(cpu.af))
 }
 
@@ -1430,7 +1458,7 @@ LD_0x5f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x60 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x60 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.hl, read_register_high(cpu.bc))
 }
 
@@ -1440,7 +1468,7 @@ LD_0x60 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x61 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x61 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.hl, read_register_low(cpu.bc))
 }
 
@@ -1450,7 +1478,7 @@ LD_0x61 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x62 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x62 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.hl, read_register_high(cpu.de))
 }
 
@@ -1460,7 +1488,7 @@ LD_0x62 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x63 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x63 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.hl, read_register_low(cpu.de))
 }
 
@@ -1470,7 +1498,7 @@ LD_0x63 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x64 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x64 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.hl, read_register_high(cpu.hl))
 }
 
@@ -1480,7 +1508,7 @@ LD_0x64 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x65 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x65 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.hl, read_register_low(cpu.hl))
 }
 
@@ -1490,8 +1518,8 @@ LD_0x65 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x66 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    write_register_high(&cpu.hl, mem[cpu.hl])
+LD_0x66 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    write_register_high(&cpu.hl, mem_read(mem, cpu.hl))
 }
 
 /*
@@ -1500,7 +1528,7 @@ LD_0x66 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x67 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x67 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.hl, read_register_high(cpu.af))
 }
 
@@ -1510,7 +1538,7 @@ LD_0x67 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x68 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x68 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.hl, read_register_high(cpu.bc))
 }
 
@@ -1520,7 +1548,7 @@ LD_0x68 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x69 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x69 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.hl, read_register_low(cpu.bc))
 }
 
@@ -1530,7 +1558,7 @@ LD_0x69 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x6a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x6a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.hl, read_register_high(cpu.de))
 }
 
@@ -1540,7 +1568,7 @@ LD_0x6a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x6b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x6b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.hl, read_register_low(cpu.de))
 }
 
@@ -1550,7 +1578,7 @@ LD_0x6b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x6c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x6c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.hl, read_register_high(cpu.hl))
 }
 
@@ -1560,7 +1588,7 @@ LD_0x6c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x6d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x6d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.hl, read_register_low(cpu.hl))
 }
 
@@ -1570,8 +1598,8 @@ LD_0x6d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x6e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    write_register_low(&cpu.hl, mem[cpu.hl])
+LD_0x6e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    write_register_low(&cpu.hl, mem_read(mem, cpu.hl))
 }
 
 /*
@@ -1580,7 +1608,7 @@ LD_0x6e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x6f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x6f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_low(&cpu.hl, read_register_high(cpu.af))
 }
 
@@ -1590,8 +1618,8 @@ LD_0x6f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x70 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    mem[cpu.hl] = read_register_high(cpu.bc)
+LD_0x70 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    mem_write(mem, cpu.hl, read_register_high(cpu.bc))
 }
 
 /*
@@ -1600,8 +1628,8 @@ LD_0x70 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x71 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    mem[cpu.hl] = read_register_low(cpu.bc)
+LD_0x71 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    mem_write(mem, cpu.hl, read_register_low(cpu.bc))
 }
 
 /*
@@ -1610,8 +1638,8 @@ LD_0x71 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x72 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    mem[cpu.hl] = read_register_high(cpu.de)
+LD_0x72 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    mem_write(mem, cpu.hl, read_register_high(cpu.de))
 }
 
 /*
@@ -1620,8 +1648,8 @@ LD_0x72 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x73 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    mem[cpu.hl] = read_register_low(cpu.de)
+LD_0x73 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    mem_write(mem, cpu.hl, read_register_low(cpu.de))
 }
 
 /*
@@ -1630,8 +1658,8 @@ LD_0x73 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x74 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    mem[cpu.hl] = read_register_high(cpu.hl)
+LD_0x74 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    mem_write(mem, cpu.hl, read_register_high(cpu.hl))
 }
 
 /*
@@ -1640,8 +1668,8 @@ LD_0x74 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x75 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    mem[cpu.hl] = read_register_low(cpu.hl)
+LD_0x75 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    mem_write(mem, cpu.hl, read_register_low(cpu.hl))
 }
 
 /*
@@ -1650,8 +1678,8 @@ LD_0x75 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x77 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    mem[cpu.hl] = read_register_high(cpu.af)
+LD_0x77 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    mem_write(mem, cpu.hl, read_register_high(cpu.af))
 }
 
 /*
@@ -1660,7 +1688,7 @@ LD_0x77 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x78 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x78 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.af, read_register_high(cpu.bc))
 }
 
@@ -1670,7 +1698,7 @@ LD_0x78 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x79 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x79 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.af, read_register_low(cpu.bc))
 }
 
@@ -1680,7 +1708,7 @@ LD_0x79 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x7a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x7a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.af, read_register_high(cpu.de))
 }
 
@@ -1690,7 +1718,7 @@ LD_0x7a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x7b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x7b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.af, read_register_low(cpu.de))
 }
 
@@ -1700,7 +1728,7 @@ LD_0x7b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x7c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x7c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.af, read_register_high(cpu.hl))
 }
 
@@ -1710,7 +1738,7 @@ LD_0x7c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x7d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x7d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.af, read_register_low(cpu.hl))
 }
 
@@ -1720,8 +1748,8 @@ LD_0x7d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0x7e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    write_register_high(&cpu.af, mem[cpu.hl])
+LD_0x7e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    write_register_high(&cpu.af, mem_read(mem, cpu.hl))
 }
 
 /*
@@ -1730,7 +1758,7 @@ LD_0x7e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-LD_0x7f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0x7f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_register_high(&cpu.af, read_register_high(cpu.af))
 }
 
@@ -1740,8 +1768,8 @@ LD_0x7f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: - - - -
  */
-LDH_0xe0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    copy_to_high_ram(mem, u8(data), read_register_high(cpu.af))
+LDH_0xe0 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    write_to_high_ram(mem, u8(data), read_register_high(cpu.af))
 }
 
 /*
@@ -1750,8 +1778,8 @@ LDH_0xe0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0xe2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    copy_to_high_ram(mem, read_register_low(cpu.bc), read_register_high(cpu.af))
+LD_0xe2 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    write_to_high_ram(mem, read_register_low(cpu.bc), read_register_high(cpu.af))
 }
 
 /*
@@ -1760,8 +1788,8 @@ LD_0xe2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-LD_0xea :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    copy_to_ram(mem, data, read_register_high(cpu.af))
+LD_0xea :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    write_to_ram(mem, data, read_register_high(cpu.af))
 }
 
 /*
@@ -1770,8 +1798,8 @@ LD_0xea :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: - - - -
  */
-LDH_0xf0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    write_register_high(&cpu.af, mem[0xFF00 + data])
+LDH_0xf0 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    write_register_high(&cpu.af, mem_read(mem, 0xFF00 + data))
 }
 
 /*
@@ -1780,10 +1808,10 @@ LDH_0xf0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-LD_0xf2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+LD_0xf2 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     addr := 0xFF00 + u16(read_register_low(cpu.bc))
 
-    write_register_high(&cpu.af, mem[addr])
+    write_register_high(&cpu.af, mem_read(mem, addr))
 }
 
 /*
@@ -1792,8 +1820,8 @@ LD_0xf2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-LD_0xfa :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    write_register_high(&cpu.af, mem[data])
+LD_0xfa :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    write_register_high(&cpu.af, mem_read(mem, data))
 }
 
 // GROUP: x16/alu
@@ -1804,7 +1832,7 @@ LD_0xfa :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-INC_0x03 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+INC_0x03 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cpu.bc += 1
 }
 
@@ -1814,7 +1842,7 @@ INC_0x03 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - 0 H C
  */
-ADD_0x09 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADD_0x09 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register(cpu, &cpu.hl, cpu.bc)
 }
 
@@ -1824,7 +1852,7 @@ ADD_0x09 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-DEC_0x0b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+DEC_0x0b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cpu.bc -= 1
 }
 
@@ -1834,7 +1862,7 @@ DEC_0x0b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-INC_0x13 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+INC_0x13 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cpu.de += 1
 }
 
@@ -1844,7 +1872,7 @@ INC_0x13 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - 0 H C
  */
-ADD_0x19 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADD_0x19 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register(cpu, &cpu.hl, cpu.de)
 }
 
@@ -1854,7 +1882,7 @@ ADD_0x19 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-DEC_0x1b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+DEC_0x1b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cpu.de -= 1
 }
 
@@ -1864,7 +1892,7 @@ DEC_0x1b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-INC_0x23 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+INC_0x23 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cpu.hl += 1
 }
 
@@ -1874,7 +1902,7 @@ INC_0x23 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - 0 H C
  */
-ADD_0x29 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADD_0x29 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register(cpu, &cpu.hl, cpu.hl)
 }
 
@@ -1884,7 +1912,7 @@ ADD_0x29 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-DEC_0x2b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+DEC_0x2b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cpu.hl -= 1
 }
 
@@ -1894,7 +1922,7 @@ DEC_0x2b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-INC_0x33 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+INC_0x33 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cpu.sp += 1
 }
 
@@ -1904,7 +1932,7 @@ INC_0x33 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - 0 H C
  */
-ADD_0x39 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADD_0x39 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register(cpu, &cpu.hl, cpu.sp)
 }
 
@@ -1914,7 +1942,7 @@ ADD_0x39 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-DEC_0x3b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+DEC_0x3b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cpu.sp -= 1
 }
 
@@ -1924,7 +1952,7 @@ DEC_0x3b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: 0 0 H C
  */
-ADD_0xe8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADD_0xe8 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
 }
 
 // GROUP: x8/alu
@@ -1935,7 +1963,7 @@ ADD_0xe8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H -
  */
-INC_0x04 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+INC_0x04 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     inc_register_high(cpu, &cpu.bc)
 }
 
@@ -1945,7 +1973,7 @@ INC_0x04 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H -
  */
-DEC_0x05 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+DEC_0x05 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     dec_register_high(cpu, &cpu.bc)
 }
 
@@ -1955,7 +1983,7 @@ DEC_0x05 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H -
  */
-INC_0x0c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+INC_0x0c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     inc_register_low(cpu, &cpu.bc)
 }
 
@@ -1965,7 +1993,7 @@ INC_0x0c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H -
  */
-DEC_0x0d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+DEC_0x0d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     dec_register_low(cpu, &cpu.bc)
 }
 
@@ -1975,7 +2003,7 @@ DEC_0x0d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H -
  */
-INC_0x14 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+INC_0x14 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     inc_register_high(cpu, &cpu.de)
 }
 
@@ -1985,7 +2013,7 @@ INC_0x14 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H -
  */
-DEC_0x15 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+DEC_0x15 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     dec_register_high(cpu, &cpu.de)
 }
 
@@ -1995,7 +2023,7 @@ DEC_0x15 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H -
  */
-INC_0x1c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+INC_0x1c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     inc_register_low(cpu, &cpu.de)
 }
 
@@ -2005,7 +2033,7 @@ INC_0x1c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H -
  */
-DEC_0x1d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+DEC_0x1d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     dec_register_low(cpu, &cpu.de)
 }
 
@@ -2015,7 +2043,7 @@ DEC_0x1d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H -
  */
-INC_0x24 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+INC_0x24 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     inc_register_high(cpu, &cpu.hl)
 }
 
@@ -2025,7 +2053,7 @@ INC_0x24 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H -
  */
-DEC_0x25 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+DEC_0x25 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     dec_register_high(cpu, &cpu.hl)
 }
 
@@ -2035,7 +2063,7 @@ DEC_0x25 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z - 0 C
  */
-DAA_0x27 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+DAA_0x27 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     // TODO
 }
 
@@ -2045,7 +2073,7 @@ DAA_0x27 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H -
  */
-INC_0x2c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+INC_0x2c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     inc_register_low(cpu, &cpu.hl)
 }
 
@@ -2055,7 +2083,7 @@ INC_0x2c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H -
  */
-DEC_0x2d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+DEC_0x2d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     dec_register_low(cpu, &cpu.hl)
 }
 
@@ -2065,7 +2093,7 @@ DEC_0x2d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - 1 1 -
  */
-CPL_0x2f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+CPL_0x2f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     acc := read_register_high(cpu.af)
 
     write_register_high(&cpu.af, ~acc)
@@ -2079,8 +2107,8 @@ CPL_0x2f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: Z 0 H -
  */
-INC_0x34 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    inc_byte(cpu, &mem[cpu.hl])
+INC_0x34 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    inc_byte(cpu, mem_get_ptr(mem, cpu.hl))
 }
 
 /*
@@ -2089,8 +2117,8 @@ INC_0x34 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: Z 1 H -
  */
-DEC_0x35 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    dec_byte(cpu, &mem[cpu.hl])
+DEC_0x35 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    dec_byte(cpu, mem_get_ptr(mem, cpu.hl))
 }
 
 /*
@@ -2099,7 +2127,7 @@ DEC_0x35 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - 0 0 1
  */
-SCF_0x37 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SCF_0x37 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_flag(cpu, Flags.N, false)
     write_flag(cpu, Flags.H, false)
     write_flag(cpu, Flags.C, true)
@@ -2111,7 +2139,7 @@ SCF_0x37 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H -
  */
-INC_0x3c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+INC_0x3c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     inc_register_high(cpu, &cpu.af)
 }
 
@@ -2121,7 +2149,7 @@ INC_0x3c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H -
  */
-DEC_0x3d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+DEC_0x3d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     dec_register_high(cpu, &cpu.af)
 }
 
@@ -2131,7 +2159,7 @@ DEC_0x3d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - 0 0 C
  */
-CCF_0x3f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+CCF_0x3f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     write_flag(cpu, Flags.N, false)
     write_flag(cpu, Flags.H, false)
     write_flag(cpu, Flags.C, !read_flag(cpu, Flags.C))
@@ -2143,7 +2171,7 @@ CCF_0x3f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H C
  */
-ADD_0x80 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADD_0x80 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register_high(cpu, &cpu.af, read_register_high(cpu.bc))
 }
 
@@ -2153,7 +2181,7 @@ ADD_0x80 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H C
  */
-ADD_0x81 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADD_0x81 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register_high(cpu, &cpu.af, read_register_low(cpu.bc))
 }
 
@@ -2163,7 +2191,7 @@ ADD_0x81 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H C
  */
-ADD_0x82 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADD_0x82 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register_high(cpu, &cpu.af, read_register_high(cpu.de))
 }
 
@@ -2173,7 +2201,7 @@ ADD_0x82 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H C
  */
-ADD_0x83 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADD_0x83 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register_high(cpu, &cpu.af, read_register_low(cpu.de))
 }
 
@@ -2183,7 +2211,7 @@ ADD_0x83 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H C
  */
-ADD_0x84 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADD_0x84 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register_high(cpu, &cpu.af, read_register_high(cpu.hl))
 }
 
@@ -2193,7 +2221,7 @@ ADD_0x84 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H C
  */
-ADD_0x85 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADD_0x85 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register_high(cpu, &cpu.af, read_register_low(cpu.hl))
 }
 
@@ -2203,8 +2231,8 @@ ADD_0x85 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 H C
  */
-ADD_0x86 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    add_to_register_high(cpu, &cpu.af, mem[cpu.hl])
+ADD_0x86 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    add_to_register_high(cpu, &cpu.af, mem_read(mem, cpu.hl))
 }
 
 /*
@@ -2213,7 +2241,7 @@ ADD_0x86 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H C
  */
-ADD_0x87 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADD_0x87 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register_high(cpu, &cpu.af, read_register_high(cpu.af))
 }
 
@@ -2223,7 +2251,7 @@ ADD_0x87 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H C
  */
-ADC_0x88 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADC_0x88 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register_high(cpu, &cpu.af, read_register_high(cpu.bc), add_carry = true)
 }
 
@@ -2233,7 +2261,7 @@ ADC_0x88 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H C
  */
-ADC_0x89 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADC_0x89 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register_high(cpu, &cpu.af, read_register_low(cpu.bc), add_carry = true)
 }
 
@@ -2243,7 +2271,7 @@ ADC_0x89 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H C
  */
-ADC_0x8a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADC_0x8a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register_high(cpu, &cpu.af, read_register_high(cpu.de), add_carry = true)
 }
 
@@ -2253,7 +2281,7 @@ ADC_0x8a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H C
  */
-ADC_0x8b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADC_0x8b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register_high(cpu, &cpu.af, read_register_low(cpu.de), add_carry = true)
 }
 
@@ -2263,7 +2291,7 @@ ADC_0x8b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H C
  */
-ADC_0x8c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADC_0x8c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register_high(cpu, &cpu.af, read_register_high(cpu.hl), add_carry = true)
 }
 
@@ -2273,7 +2301,7 @@ ADC_0x8c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H C
  */
-ADC_0x8d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADC_0x8d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register_high(cpu, &cpu.af, read_register_low(cpu.hl), add_carry = true)
 }
 
@@ -2283,8 +2311,8 @@ ADC_0x8d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 H C
  */
-ADC_0x8e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    add_to_register_high(cpu, &cpu.af, mem[cpu.hl], add_carry = true)
+ADC_0x8e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    add_to_register_high(cpu, &cpu.af, mem_read(mem, cpu.hl), add_carry = true)
 }
 
 /*
@@ -2293,7 +2321,7 @@ ADC_0x8e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 H C
  */
-ADC_0x8f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADC_0x8f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register_high(cpu, &cpu.af, read_register_high(cpu.af), add_carry = true)
 }
 
@@ -2303,7 +2331,7 @@ ADC_0x8f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-SUB_0x90 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SUB_0x90 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sub_from_register_high(cpu, &cpu.af, read_register_high(cpu.bc))
 }
 
@@ -2313,7 +2341,7 @@ SUB_0x90 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-SUB_0x91 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SUB_0x91 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sub_from_register_high(cpu, &cpu.af, read_register_low(cpu.bc))
 }
 
@@ -2323,7 +2351,7 @@ SUB_0x91 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-SUB_0x92 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SUB_0x92 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sub_from_register_high(cpu, &cpu.af, read_register_high(cpu.de))
 }
 
@@ -2333,7 +2361,7 @@ SUB_0x92 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-SUB_0x93 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SUB_0x93 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sub_from_register_high(cpu, &cpu.af, read_register_low(cpu.de))
 }
 
@@ -2343,7 +2371,7 @@ SUB_0x93 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-SUB_0x94 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SUB_0x94 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sub_from_register_high(cpu, &cpu.af, read_register_high(cpu.hl))
 }
 
@@ -2353,7 +2381,7 @@ SUB_0x94 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-SUB_0x95 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SUB_0x95 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sub_from_register_high(cpu, &cpu.af, read_register_low(cpu.hl))
 }
 
@@ -2363,8 +2391,8 @@ SUB_0x95 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 1 H C
  */
-SUB_0x96 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    sub_from_register_high(cpu, &cpu.af, mem[cpu.hl])
+SUB_0x96 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    sub_from_register_high(cpu, &cpu.af, mem_read(mem, cpu.hl))
 }
 
 /*
@@ -2373,7 +2401,7 @@ SUB_0x96 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-SUB_0x97 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SUB_0x97 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sub_from_register_high(cpu, &cpu.af, read_register_high(cpu.af))
 }
 
@@ -2383,7 +2411,7 @@ SUB_0x97 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-SBC_0x98 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SBC_0x98 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sub_from_register_high(cpu, &cpu.af, read_register_high(cpu.bc), sub_carry = true)
 }
 
@@ -2393,7 +2421,7 @@ SBC_0x98 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-SBC_0x99 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SBC_0x99 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sub_from_register_high(cpu, &cpu.af, read_register_low(cpu.bc), sub_carry = true)
 }
 
@@ -2403,7 +2431,7 @@ SBC_0x99 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-SBC_0x9a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SBC_0x9a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sub_from_register_high(cpu, &cpu.af, read_register_high(cpu.de), sub_carry = true)
 }
 
@@ -2413,7 +2441,7 @@ SBC_0x9a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-SBC_0x9b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SBC_0x9b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sub_from_register_high(cpu, &cpu.af, read_register_low(cpu.de), sub_carry = true)
 }
 
@@ -2423,7 +2451,7 @@ SBC_0x9b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-SBC_0x9c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SBC_0x9c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sub_from_register_high(cpu, &cpu.af, read_register_high(cpu.hl), sub_carry = true)
 }
 
@@ -2433,7 +2461,7 @@ SBC_0x9c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-SBC_0x9d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SBC_0x9d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sub_from_register_high(cpu, &cpu.af, read_register_low(cpu.hl), sub_carry = true)
 }
 
@@ -2443,8 +2471,8 @@ SBC_0x9d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 1 H C
  */
-SBC_0x9e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    sub_from_register_high(cpu, &cpu.af, mem[cpu.hl], sub_carry = true)
+SBC_0x9e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    sub_from_register_high(cpu, &cpu.af, mem_read(mem, cpu.hl), sub_carry = true)
 }
 
 /*
@@ -2453,7 +2481,7 @@ SBC_0x9e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-SBC_0x9f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SBC_0x9f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sub_from_register_high(cpu, &cpu.af, read_register_high(cpu.af), sub_carry = true)
 }
 
@@ -2463,7 +2491,7 @@ SBC_0x9f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 1 0
  */
-AND_0xa0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+AND_0xa0 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     and_register_high(cpu, &cpu.af, read_register_high(cpu.bc))
 }
 
@@ -2473,7 +2501,7 @@ AND_0xa0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 1 0
  */
-AND_0xa1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+AND_0xa1 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     and_register_high(cpu, &cpu.af, read_register_low(cpu.bc))
 }
 
@@ -2483,7 +2511,7 @@ AND_0xa1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 1 0
  */
-AND_0xa2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+AND_0xa2 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     and_register_high(cpu, &cpu.af, read_register_high(cpu.de))
 }
 
@@ -2493,7 +2521,7 @@ AND_0xa2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 1 0
  */
-AND_0xa3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+AND_0xa3 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     and_register_high(cpu, &cpu.af, read_register_low(cpu.de))
 }
 
@@ -2503,7 +2531,7 @@ AND_0xa3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 1 0
  */
-AND_0xa4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+AND_0xa4 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     and_register_high(cpu, &cpu.af, read_register_high(cpu.hl))
 }
 
@@ -2513,7 +2541,7 @@ AND_0xa4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 1 0
  */
-AND_0xa5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+AND_0xa5 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     and_register_high(cpu, &cpu.af, read_register_low(cpu.hl))
 }
 
@@ -2523,8 +2551,8 @@ AND_0xa5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 0
  */
-AND_0xa6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    and_register_high(cpu, &cpu.af, mem[cpu.hl])
+AND_0xa6 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    and_register_high(cpu, &cpu.af, mem_read(mem, cpu.hl))
 }
 
 /*
@@ -2533,7 +2561,7 @@ AND_0xa6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 1 0
  */
-AND_0xa7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+AND_0xa7 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     and_register_high(cpu, &cpu.af, read_register_high(cpu.af))
 }
 
@@ -2543,7 +2571,7 @@ AND_0xa7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 0 0
  */
-XOR_0xa8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+XOR_0xa8 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     xor_register_high(cpu, &cpu.af, read_register_high(cpu.bc))
 }
 
@@ -2553,7 +2581,7 @@ XOR_0xa8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 0 0
  */
-XOR_0xa9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+XOR_0xa9 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     xor_register_high(cpu, &cpu.af, read_register_low(cpu.bc))
 }
 
@@ -2563,7 +2591,7 @@ XOR_0xa9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 0 0
  */
-XOR_0xaa :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+XOR_0xaa :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     xor_register_high(cpu, &cpu.af, read_register_high(cpu.de))
 }
 
@@ -2573,7 +2601,7 @@ XOR_0xaa :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 0 0
  */
-XOR_0xab :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+XOR_0xab :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     xor_register_high(cpu, &cpu.af, read_register_low(cpu.de))
 }
 
@@ -2583,7 +2611,7 @@ XOR_0xab :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 0 0
  */
-XOR_0xac :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+XOR_0xac :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     xor_register_high(cpu, &cpu.af, read_register_high(cpu.hl))
 }
 
@@ -2593,7 +2621,7 @@ XOR_0xac :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 0 0
  */
-XOR_0xad :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+XOR_0xad :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     xor_register_high(cpu, &cpu.af, read_register_low(cpu.hl))
 }
 
@@ -2603,8 +2631,8 @@ XOR_0xad :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 0
  */
-XOR_0xae :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    xor_register_high(cpu, &cpu.af, mem[cpu.hl])
+XOR_0xae :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    xor_register_high(cpu, &cpu.af, mem_read(mem, cpu.hl))
 }
 
 /*
@@ -2613,7 +2641,7 @@ XOR_0xae :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 0 0
  */
-XOR_0xaf :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+XOR_0xaf :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     xor_register_high(cpu, &cpu.af, read_register_high(cpu.af))
 }
 
@@ -2623,7 +2651,7 @@ XOR_0xaf :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 0 0
  */
-OR_0xb0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+OR_0xb0 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     or_register_high(cpu, &cpu.af, read_register_high(cpu.bc))
 }
 
@@ -2633,7 +2661,7 @@ OR_0xb0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 0 0
  */
-OR_0xb1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+OR_0xb1 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     or_register_high(cpu, &cpu.af, read_register_low(cpu.bc))
 }
 
@@ -2643,7 +2671,7 @@ OR_0xb1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 0 0
  */
-OR_0xb2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+OR_0xb2 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     or_register_high(cpu, &cpu.af, read_register_high(cpu.de))
 }
 
@@ -2653,7 +2681,7 @@ OR_0xb2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 0 0
  */
-OR_0xb3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+OR_0xb3 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     or_register_high(cpu, &cpu.af, read_register_low(cpu.de))
 }
 
@@ -2663,7 +2691,7 @@ OR_0xb3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 0 0
  */
-OR_0xb4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+OR_0xb4 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     or_register_high(cpu, &cpu.af, read_register_high(cpu.hl))
 }
 
@@ -2673,7 +2701,7 @@ OR_0xb4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 0 0
  */
-OR_0xb5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+OR_0xb5 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     or_register_high(cpu, &cpu.af, read_register_low(cpu.hl))
 }
 
@@ -2683,8 +2711,8 @@ OR_0xb5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 0
  */
-OR_0xb6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    or_register_high(cpu, &cpu.af, mem[cpu.hl])
+OR_0xb6 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    or_register_high(cpu, &cpu.af, mem_read(mem, cpu.hl))
 }
 
 /*
@@ -2693,7 +2721,7 @@ OR_0xb6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 0 0 0
  */
-OR_0xb7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+OR_0xb7 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     or_register_high(cpu, &cpu.af, read_register_high(cpu.af))
 }
 
@@ -2703,7 +2731,7 @@ OR_0xb7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-CP_0xb8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+CP_0xb8 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cp_bytes(cpu, read_register_high(cpu.af), read_register_high(cpu.bc))
 }
 
@@ -2713,7 +2741,7 @@ CP_0xb8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-CP_0xb9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+CP_0xb9 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cp_bytes(cpu, read_register_high(cpu.af), read_register_low(cpu.bc))
 }
 
@@ -2723,7 +2751,7 @@ CP_0xb9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-CP_0xba :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+CP_0xba :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cp_bytes(cpu, read_register_high(cpu.af), read_register_high(cpu.de))
 }
 
@@ -2733,7 +2761,7 @@ CP_0xba :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-CP_0xbb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+CP_0xbb :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cp_bytes(cpu, read_register_high(cpu.af), read_register_low(cpu.de))
 }
 
@@ -2743,7 +2771,7 @@ CP_0xbb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-CP_0xbc :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+CP_0xbc :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cp_bytes(cpu, read_register_high(cpu.af), read_register_high(cpu.hl))
 }
 
@@ -2753,7 +2781,7 @@ CP_0xbc :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-CP_0xbd :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+CP_0xbd :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cp_bytes(cpu, read_register_high(cpu.af), read_register_low(cpu.hl))
 }
 
@@ -2763,8 +2791,8 @@ CP_0xbd :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 1 H C
  */
-CP_0xbe :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    cp_bytes(cpu, read_register_high(cpu.af), mem[cpu.hl])
+CP_0xbe :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    cp_bytes(cpu, read_register_high(cpu.af), mem_read(mem, cpu.hl))
 }
 
 /*
@@ -2773,7 +2801,7 @@ CP_0xbe :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: Z 1 H C
  */
-CP_0xbf :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+CP_0xbf :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cp_bytes(cpu, read_register_high(cpu.af), read_register_high(cpu.af))
 }
 
@@ -2783,7 +2811,7 @@ CP_0xbf :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 H C
  */
-ADD_0xc6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADD_0xc6 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register_high(cpu, &cpu.af, u8(data))
 }
 
@@ -2793,7 +2821,7 @@ ADD_0xc6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 H C
  */
-ADC_0xce :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+ADC_0xce :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     add_to_register_high(cpu, &cpu.af, u8(data), add_carry = true)
 }
 
@@ -2803,7 +2831,7 @@ ADC_0xce :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 1 H C
  */
-SUB_0xd6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SUB_0xd6 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sub_from_register_high(cpu, &cpu.af, u8(data))
 }
 
@@ -2813,7 +2841,7 @@ SUB_0xd6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 1 H C
  */
-SBC_0xde :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SBC_0xde :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sub_from_register_high(cpu, &cpu.af, u8(data), sub_carry = true)
 }
 
@@ -2823,7 +2851,7 @@ SBC_0xde :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 0
  */
-AND_0xe6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+AND_0xe6 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     and_register_high(cpu, &cpu.af, u8(data))
 }
 
@@ -2833,7 +2861,7 @@ AND_0xe6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 0
  */
-XOR_0xee :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+XOR_0xee :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     xor_register_high(cpu, &cpu.af, u8(data))
 }
 
@@ -2843,7 +2871,7 @@ XOR_0xee :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 0
  */
-OR_0xf6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+OR_0xf6 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     or_register_high(cpu, &cpu.af, u8(data))
 }
 
@@ -2853,7 +2881,7 @@ OR_0xf6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 1 H C
  */
-CP_0xfe :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+CP_0xfe :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cp_bytes(cpu, read_register_high(cpu.af), u8(data))
 }
 
@@ -2865,7 +2893,7 @@ CP_0xfe :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: 0 0 0 C
  */
-RLCA_0x07 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RLCA_0x07 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     acc := read_register_high(cpu.af)
     c := acc & 0x80 > 0
 
@@ -2883,7 +2911,7 @@ RLCA_0x07 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: 0 0 0 C
  */
-RRCA_0x0f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RRCA_0x0f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     acc := read_register_high(cpu.af)
     c := acc & 1 > 0
 
@@ -2901,7 +2929,7 @@ RRCA_0x0f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: 0 0 0 C
  */
-RLA_0x17 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RLA_0x17 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     acc := read_register_high(cpu.af)
     c := acc & 0x80 > 0
     acc = (acc << 1) | u8(read_flag(cpu, Flags.C))
@@ -2920,7 +2948,7 @@ RLA_0x17 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: 0 0 0 C
  */
-RRA_0x1f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RRA_0x1f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     acc := read_register_high(cpu.af)
     c := acc & 1 > 0
     acc = (acc >> 1) | (u8(read_flag(cpu, Flags.C)) << 7)
@@ -2941,7 +2969,7 @@ RRA_0x1f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: - - - -
  */
-JR_0x18 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+JR_0x18 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     jr(cpu, i8(data))
 }
 
@@ -2951,7 +2979,7 @@ JR_0x18 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: - - - -
  */
-JR_0x20 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+JR_0x20 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     if !read_flag(cpu, Flags.Z) {
         jr(cpu, i8(data))
     }
@@ -2963,7 +2991,7 @@ JR_0x20 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: - - - -
  */
-JR_0x28 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+JR_0x28 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     if read_flag(cpu, Flags.Z) {
         jr(cpu, i8(data))
     }
@@ -2975,7 +3003,7 @@ JR_0x28 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: - - - -
  */
-JR_0x30 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+JR_0x30 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     if !read_flag(cpu, Flags.C) {
         jr(cpu, i8(data))
     }
@@ -2987,7 +3015,7 @@ JR_0x30 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 12
    Flags: - - - -
  */
-JR_0x38 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+JR_0x38 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     if read_flag(cpu, Flags.C) {
         jr(cpu, i8(data))
     }
@@ -2999,7 +3027,7 @@ JR_0x38 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 20
    Flags: - - - -
  */
-RET_0xc0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RET_0xc0 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     if !read_flag(cpu, Flags.Z) {
         ret(cpu, mem)
     }
@@ -3011,7 +3039,7 @@ RET_0xc0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-JP_0xc2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+JP_0xc2 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     if !read_flag(cpu, Flags.Z) {
         cpu.pc = data
     }
@@ -3023,7 +3051,7 @@ JP_0xc2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-JP_0xc3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+JP_0xc3 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cpu.pc = data
 }
 
@@ -3033,7 +3061,7 @@ JP_0xc3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 24
    Flags: - - - -
  */
-CALL_0xc4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+CALL_0xc4 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     if !read_flag(cpu, Flags.Z) {
         call(cpu, mem, data)
     }
@@ -3045,7 +3073,7 @@ CALL_0xc4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-RST_0xc7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RST_0xc7 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     call(cpu, mem, 0)
 }
 
@@ -3055,7 +3083,7 @@ RST_0xc7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 20
    Flags: - - - -
  */
-RET_0xc8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RET_0xc8 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     if read_flag(cpu, Flags.Z) {
         ret(cpu, mem)
     }
@@ -3067,7 +3095,7 @@ RET_0xc8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-RET_0xc9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RET_0xc9 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     ret(cpu, mem)
 }
 
@@ -3077,7 +3105,7 @@ RET_0xc9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-JP_0xca :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+JP_0xca :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     if read_flag(cpu, Flags.Z) {
         cpu.pc = data
     }
@@ -3089,7 +3117,7 @@ JP_0xca :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 24
    Flags: - - - -
  */
-CALL_0xcc :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+CALL_0xcc :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     if read_flag(cpu, Flags.Z) {
         call(cpu, mem, data)
     }
@@ -3101,7 +3129,7 @@ CALL_0xcc :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 24
    Flags: - - - -
  */
-CALL_0xcd :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+CALL_0xcd :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     call(cpu, mem, data)
 }
 
@@ -3111,7 +3139,7 @@ CALL_0xcd :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-RST_0xcf :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RST_0xcf :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     call(cpu, mem, 0x08)
 }
 
@@ -3121,7 +3149,7 @@ RST_0xcf :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 20
    Flags: - - - -
  */
-RET_0xd0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RET_0xd0 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     if !read_flag(cpu, Flags.C) {
         ret(cpu, mem)
     }
@@ -3133,7 +3161,7 @@ RET_0xd0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-JP_0xd2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+JP_0xd2 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     if !read_flag(cpu, Flags.C) {
         cpu.pc = data
     }
@@ -3145,7 +3173,7 @@ JP_0xd2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 24
    Flags: - - - -
  */
-CALL_0xd4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+CALL_0xd4 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     if !read_flag(cpu, Flags.C) {
         call(cpu, mem, data)
     }
@@ -3157,7 +3185,7 @@ CALL_0xd4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-RST_0xd7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RST_0xd7 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     call(cpu, mem, 0x10)
 }
 
@@ -3167,7 +3195,7 @@ RST_0xd7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 20
    Flags: - - - -
  */
-RET_0xd8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RET_0xd8 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     if read_flag(cpu, Flags.C) {
         ret(cpu, mem)
     }
@@ -3179,7 +3207,7 @@ RET_0xd8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-RETI_0xd9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RETI_0xd9 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     ret(cpu, mem)
     cpu.ime = true
 }
@@ -3190,7 +3218,7 @@ RETI_0xd9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-JP_0xda :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+JP_0xda :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     if read_flag(cpu, Flags.C) {
         cpu.pc = data
     }
@@ -3202,7 +3230,7 @@ JP_0xda :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 24
    Flags: - - - -
  */
-CALL_0xdc :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+CALL_0xdc :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     if read_flag(cpu, Flags.C) {
         call(cpu, mem, data)
     }
@@ -3214,7 +3242,7 @@ CALL_0xdc :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-RST_0xdf :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RST_0xdf :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     call(cpu, mem, 0x18)
 }
 
@@ -3224,7 +3252,7 @@ RST_0xdf :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-RST_0xe7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RST_0xe7 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     call(cpu, mem, 0x20)
 }
 
@@ -3234,7 +3262,7 @@ RST_0xe7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 4
    Flags: - - - -
  */
-JP_0xe9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+JP_0xe9 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     cpu.pc = cpu.hl
 }
 
@@ -3244,7 +3272,7 @@ JP_0xe9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-RST_0xef :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RST_0xef :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     call(cpu, mem, 0x28)
 }
 
@@ -3254,7 +3282,7 @@ RST_0xef :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-RST_0xf7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RST_0xf7 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     call(cpu, mem, 0x30)
 }
 
@@ -3264,7 +3292,7 @@ RST_0xf7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-RST_0xff :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RST_0xff :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     call(cpu, mem, 0x38)
 }
 
@@ -3278,7 +3306,7 @@ RST_0xff :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RLC_0x00 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RLC_0x00 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rlc_register_high(cpu, &cpu.bc)
 }
 
@@ -3288,7 +3316,7 @@ RLC_0x00 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RLC_0x01 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RLC_0x01 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rlc_register_low(cpu, &cpu.bc)
 }
 
@@ -3298,7 +3326,7 @@ RLC_0x01 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RLC_0x02 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RLC_0x02 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rlc_register_high(cpu, &cpu.de)
 }
 
@@ -3308,7 +3336,7 @@ RLC_0x02 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RLC_0x03 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RLC_0x03 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rlc_register_low(cpu, &cpu.de)
 }
 
@@ -3318,7 +3346,7 @@ RLC_0x03 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RLC_0x04 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RLC_0x04 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rlc_register_high(cpu, &cpu.hl)
 }
 
@@ -3328,7 +3356,7 @@ RLC_0x04 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RLC_0x05 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RLC_0x05 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rlc_register_low(cpu, &cpu.hl)
 }
 
@@ -3338,8 +3366,8 @@ RLC_0x05 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: Z 0 0 C
  */
-RLC_0x06 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    rlc(cpu, &mem[cpu.hl])
+RLC_0x06 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    rlc(cpu, mem_get_ptr(mem, cpu.hl))
 }
 
 /*
@@ -3348,7 +3376,7 @@ RLC_0x06 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RLC_0x07 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RLC_0x07 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rlc_register_high(cpu, &cpu.af)
 }
 
@@ -3358,7 +3386,7 @@ RLC_0x07 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RRC_0x08 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RRC_0x08 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rrc_register_high(cpu, &cpu.bc)
 }
 
@@ -3368,7 +3396,7 @@ RRC_0x08 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RRC_0x09 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RRC_0x09 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rrc_register_low(cpu, &cpu.bc)
 }
 
@@ -3378,7 +3406,7 @@ RRC_0x09 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RRC_0x0a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RRC_0x0a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rrc_register_high(cpu, &cpu.de)
 }
 
@@ -3388,7 +3416,7 @@ RRC_0x0a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RRC_0x0b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RRC_0x0b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rrc_register_low(cpu, &cpu.de)
 }
 
@@ -3398,7 +3426,7 @@ RRC_0x0b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RRC_0x0c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RRC_0x0c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rrc_register_high(cpu, &cpu.hl)
 }
 
@@ -3408,7 +3436,7 @@ RRC_0x0c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RRC_0x0d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RRC_0x0d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rrc_register_low(cpu, &cpu.hl)
 }
 
@@ -3418,8 +3446,8 @@ RRC_0x0d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: Z 0 0 C
  */
-RRC_0x0e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    rrc(cpu, &mem[cpu.hl])
+RRC_0x0e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    rrc(cpu, mem_get_ptr(mem, cpu.hl))
 }
 
 /*
@@ -3428,7 +3456,7 @@ RRC_0x0e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RRC_0x0f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RRC_0x0f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rrc_register_high(cpu, &cpu.af)
 }
 
@@ -3438,7 +3466,7 @@ RRC_0x0f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RL_0x10 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RL_0x10 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rl_register_high(cpu, &cpu.bc)
 }
 
@@ -3448,7 +3476,7 @@ RL_0x10 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RL_0x11 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RL_0x11 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rl_register_low(cpu, &cpu.bc)
 }
 
@@ -3458,7 +3486,7 @@ RL_0x11 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RL_0x12 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RL_0x12 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rl_register_high(cpu, &cpu.de)
 }
 
@@ -3468,7 +3496,7 @@ RL_0x12 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RL_0x13 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RL_0x13 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rl_register_low(cpu, &cpu.de)
 }
 
@@ -3478,7 +3506,7 @@ RL_0x13 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RL_0x14 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RL_0x14 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rl_register_high(cpu, &cpu.hl)
 }
 
@@ -3488,7 +3516,7 @@ RL_0x14 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RL_0x15 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RL_0x15 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rl_register_low(cpu, &cpu.hl)
 }
 
@@ -3498,8 +3526,8 @@ RL_0x15 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: Z 0 0 C
  */
-RL_0x16 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    rl(cpu, &mem[cpu.hl])
+RL_0x16 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    rl(cpu, mem_get_ptr(mem, cpu.hl))
 }
 
 /*
@@ -3508,7 +3536,7 @@ RL_0x16 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RL_0x17 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RL_0x17 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rl_register_high(cpu, &cpu.af)
 }
 
@@ -3518,7 +3546,7 @@ RL_0x17 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RR_0x18 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RR_0x18 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rr_register_high(cpu, &cpu.bc)
 }
 
@@ -3528,7 +3556,7 @@ RR_0x18 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RR_0x19 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RR_0x19 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rr_register_low(cpu, &cpu.bc)
 }
 
@@ -3538,7 +3566,7 @@ RR_0x19 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RR_0x1a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RR_0x1a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rr_register_high(cpu, &cpu.de)
 }
 
@@ -3548,7 +3576,7 @@ RR_0x1a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RR_0x1b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RR_0x1b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rr_register_low(cpu, &cpu.de)
 }
 
@@ -3558,7 +3586,7 @@ RR_0x1b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RR_0x1c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RR_0x1c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rr_register_high(cpu, &cpu.hl)
 }
 
@@ -3568,7 +3596,7 @@ RR_0x1c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RR_0x1d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RR_0x1d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rr_register_low(cpu, &cpu.hl)
 }
 
@@ -3578,8 +3606,8 @@ RR_0x1d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: Z 0 0 C
  */
-RR_0x1e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    rr(cpu, &mem[cpu.hl])
+RR_0x1e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    rr(cpu, mem_get_ptr(mem, cpu.hl))
 }
 
 /*
@@ -3588,7 +3616,7 @@ RR_0x1e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-RR_0x1f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RR_0x1f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     rr_register_high(cpu, &cpu.af)
 }
 
@@ -3598,7 +3626,7 @@ RR_0x1f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-SLA_0x20 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SLA_0x20 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sla_register_high(cpu, &cpu.bc)
 }
 
@@ -3608,7 +3636,7 @@ SLA_0x20 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-SLA_0x21 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SLA_0x21 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sla_register_low(cpu, &cpu.bc)
 }
 
@@ -3618,7 +3646,7 @@ SLA_0x21 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-SLA_0x22 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SLA_0x22 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sla_register_high(cpu, &cpu.de)
 }
 
@@ -3628,7 +3656,7 @@ SLA_0x22 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-SLA_0x23 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SLA_0x23 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sla_register_low(cpu, &cpu.de)
 }
 
@@ -3638,7 +3666,7 @@ SLA_0x23 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-SLA_0x24 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SLA_0x24 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sla_register_high(cpu, &cpu.hl)
 }
 
@@ -3648,7 +3676,7 @@ SLA_0x24 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-SLA_0x25 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SLA_0x25 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sla_register_low(cpu, &cpu.hl)
 }
 
@@ -3658,8 +3686,8 @@ SLA_0x25 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: Z 0 0 C
  */
-SLA_0x26 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    sla(cpu, &mem[cpu.hl])
+SLA_0x26 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    sla(cpu, mem_get_ptr(mem, cpu.hl))
 }
 
 /*
@@ -3668,7 +3696,7 @@ SLA_0x26 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-SLA_0x27 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SLA_0x27 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sla_register_high(cpu, &cpu.af)
 }
 
@@ -3678,7 +3706,7 @@ SLA_0x27 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 0
  */
-SRA_0x28 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SRA_0x28 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sra_register_high(cpu, &cpu.bc)
 }
 
@@ -3688,7 +3716,7 @@ SRA_0x28 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 0
  */
-SRA_0x29 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SRA_0x29 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sra_register_low(cpu, &cpu.bc)
 }
 
@@ -3698,7 +3726,7 @@ SRA_0x29 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 0
  */
-SRA_0x2a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SRA_0x2a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sra_register_high(cpu, &cpu.de)
 }
 
@@ -3708,7 +3736,7 @@ SRA_0x2a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 0
  */
-SRA_0x2b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SRA_0x2b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sra_register_low(cpu, &cpu.de)
 }
 
@@ -3718,7 +3746,7 @@ SRA_0x2b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 0
  */
-SRA_0x2c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SRA_0x2c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sra_register_high(cpu, &cpu.hl)
 }
 
@@ -3728,7 +3756,7 @@ SRA_0x2c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 0
  */
-SRA_0x2d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SRA_0x2d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sra_register_low(cpu, &cpu.hl)
 }
 
@@ -3738,8 +3766,8 @@ SRA_0x2d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: Z 0 0 0
  */
-SRA_0x2e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    sra(cpu, &mem[cpu.hl])
+SRA_0x2e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    sra(cpu, mem_get_ptr(mem, cpu.hl))
 }
 
 /*
@@ -3748,7 +3776,7 @@ SRA_0x2e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 0
  */
-SRA_0x2f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SRA_0x2f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     sra_register_high(cpu, &cpu.af)
 }
 
@@ -3758,7 +3786,7 @@ SRA_0x2f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 0
  */
-SWAP_0x30 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SWAP_0x30 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     swap_register_high(cpu, &cpu.bc)
 }
 
@@ -3768,7 +3796,7 @@ SWAP_0x30 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 0
  */
-SWAP_0x31 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SWAP_0x31 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     swap_register_low(cpu, &cpu.bc)
 }
 
@@ -3778,7 +3806,7 @@ SWAP_0x31 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 0
  */
-SWAP_0x32 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SWAP_0x32 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     swap_register_high(cpu, &cpu.de)
 }
 
@@ -3788,7 +3816,7 @@ SWAP_0x32 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 0
  */
-SWAP_0x33 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SWAP_0x33 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     swap_register_low(cpu, &cpu.de)
 }
 
@@ -3798,7 +3826,7 @@ SWAP_0x33 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 0
  */
-SWAP_0x34 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SWAP_0x34 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     swap_register_high(cpu, &cpu.hl)
 }
 
@@ -3808,7 +3836,7 @@ SWAP_0x34 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 0
  */
-SWAP_0x35 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SWAP_0x35 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     swap_register_low(cpu, &cpu.hl)
 }
 
@@ -3818,8 +3846,8 @@ SWAP_0x35 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: Z 0 0 0
  */
-SWAP_0x36 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    swap(cpu, &mem[cpu.hl])
+SWAP_0x36 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    swap(cpu, mem_get_ptr(mem, cpu.hl))
 }
 
 /*
@@ -3828,7 +3856,7 @@ SWAP_0x36 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 0
  */
-SWAP_0x37 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SWAP_0x37 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     swap_register_high(cpu, &cpu.af)
 }
 
@@ -3838,7 +3866,7 @@ SWAP_0x37 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-SRL_0x38 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SRL_0x38 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     srl_register_high(cpu, &cpu.bc)
 }
 
@@ -3848,7 +3876,7 @@ SRL_0x38 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-SRL_0x39 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SRL_0x39 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     srl_register_low(cpu, &cpu.bc)
 }
 
@@ -3858,7 +3886,7 @@ SRL_0x39 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-SRL_0x3a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SRL_0x3a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     srl_register_high(cpu, &cpu.de)
 }
 
@@ -3868,7 +3896,7 @@ SRL_0x3a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-SRL_0x3b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SRL_0x3b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     srl_register_low(cpu, &cpu.de)
 }
 
@@ -3878,7 +3906,7 @@ SRL_0x3b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-SRL_0x3c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SRL_0x3c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     srl_register_high(cpu, &cpu.hl)
 }
 
@@ -3888,7 +3916,7 @@ SRL_0x3c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-SRL_0x3d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SRL_0x3d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     srl_register_low(cpu, &cpu.hl)
 }
 
@@ -3898,8 +3926,8 @@ SRL_0x3d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: Z 0 0 C
  */
-SRL_0x3e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    srl(cpu, &mem[cpu.hl])
+SRL_0x3e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    srl(cpu, mem_get_ptr(mem, cpu.hl))
 }
 
 /*
@@ -3908,7 +3936,7 @@ SRL_0x3e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 0 C
  */
-SRL_0x3f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SRL_0x3f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     srl_register_high(cpu, &cpu.af)
 }
 
@@ -3918,7 +3946,7 @@ SRL_0x3f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x40 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x40 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.bc, 0)
 }
 
@@ -3928,7 +3956,7 @@ BIT_0x40 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x41 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x41 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.bc, 0)
 }
 
@@ -3938,7 +3966,7 @@ BIT_0x41 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x42 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x42 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.de, 0)
 }
 
@@ -3948,7 +3976,7 @@ BIT_0x42 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x43 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x43 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.de, 0)
 }
 
@@ -3958,7 +3986,7 @@ BIT_0x43 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x44 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x44 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.hl, 0)
 }
 
@@ -3968,7 +3996,7 @@ BIT_0x44 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x45 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x45 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.hl, 0)
 }
 
@@ -3978,8 +4006,8 @@ BIT_0x45 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: Z 0 1 -
  */
-BIT_0x46 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    bit(cpu, &mem[cpu.hl], 0)
+BIT_0x46 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    bit(cpu, mem_get_ptr(mem, cpu.hl), 0)
 }
 
 /*
@@ -3988,7 +4016,7 @@ BIT_0x46 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x47 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x47 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.af, 0)
 }
 
@@ -3998,7 +4026,7 @@ BIT_0x47 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x48 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x48 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.bc, 1)
 }
 
@@ -4008,7 +4036,7 @@ BIT_0x48 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x49 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x49 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.bc, 1)
 }
 
@@ -4018,7 +4046,7 @@ BIT_0x49 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x4a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x4a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.de, 1)
 }
 
@@ -4028,7 +4056,7 @@ BIT_0x4a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x4b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x4b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.de, 1)
 }
 
@@ -4038,7 +4066,7 @@ BIT_0x4b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x4c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x4c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.hl, 1)
 }
 
@@ -4048,7 +4076,7 @@ BIT_0x4c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x4d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x4d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.hl, 1)
 }
 
@@ -4058,8 +4086,8 @@ BIT_0x4d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: Z 0 1 -
  */
-BIT_0x4e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    bit(cpu, &mem[cpu.hl], 1)
+BIT_0x4e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    bit(cpu, mem_get_ptr(mem, cpu.hl), 1)
 }
 
 /*
@@ -4068,7 +4096,7 @@ BIT_0x4e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x4f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x4f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.af, 1)
 }
 
@@ -4078,7 +4106,7 @@ BIT_0x4f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x50 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x50 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.bc, 2)
 }
 
@@ -4088,7 +4116,7 @@ BIT_0x50 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x51 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x51 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.bc, 2)
 }
 
@@ -4098,7 +4126,7 @@ BIT_0x51 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x52 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x52 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.de, 2)
 }
 
@@ -4108,7 +4136,7 @@ BIT_0x52 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x53 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x53 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.de, 2)
 }
 
@@ -4118,7 +4146,7 @@ BIT_0x53 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x54 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x54 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.hl, 2)
 }
 
@@ -4128,7 +4156,7 @@ BIT_0x54 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x55 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x55 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.hl, 2)
 }
 
@@ -4138,8 +4166,8 @@ BIT_0x55 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: Z 0 1 -
  */
-BIT_0x56 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    bit(cpu, &mem[cpu.hl], 2)
+BIT_0x56 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    bit(cpu, mem_get_ptr(mem, cpu.hl), 2)
 }
 
 /*
@@ -4148,7 +4176,7 @@ BIT_0x56 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x57 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x57 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.af, 2)
 }
 
@@ -4158,7 +4186,7 @@ BIT_0x57 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x58 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x58 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.bc, 3)
 }
 
@@ -4168,7 +4196,7 @@ BIT_0x58 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x59 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x59 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.bc, 3)
 }
 
@@ -4178,7 +4206,7 @@ BIT_0x59 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x5a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x5a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.de, 3)
 }
 
@@ -4188,7 +4216,7 @@ BIT_0x5a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x5b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x5b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.de, 3)
 }
 
@@ -4198,7 +4226,7 @@ BIT_0x5b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x5c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x5c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.hl, 3)
 }
 
@@ -4208,7 +4236,7 @@ BIT_0x5c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x5d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x5d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.hl, 3)
 }
 
@@ -4218,8 +4246,8 @@ BIT_0x5d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: Z 0 1 -
  */
-BIT_0x5e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    bit(cpu, &mem[cpu.hl], 3)
+BIT_0x5e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    bit(cpu, mem_get_ptr(mem, cpu.hl), 3)
 }
 
 /*
@@ -4228,7 +4256,7 @@ BIT_0x5e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x5f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x5f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.af, 3)
 }
 
@@ -4238,7 +4266,7 @@ BIT_0x5f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x60 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x60 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.bc, 4)
 }
 
@@ -4248,7 +4276,7 @@ BIT_0x60 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x61 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x61 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.bc, 4)
 }
 
@@ -4258,7 +4286,7 @@ BIT_0x61 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x62 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x62 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.de, 4)
 }
 
@@ -4268,7 +4296,7 @@ BIT_0x62 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x63 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x63 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.de, 4)
 }
 
@@ -4278,7 +4306,7 @@ BIT_0x63 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x64 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x64 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.hl, 4)
 }
 
@@ -4288,7 +4316,7 @@ BIT_0x64 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x65 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x65 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.hl, 4)
 }
 
@@ -4298,8 +4326,8 @@ BIT_0x65 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: Z 0 1 -
  */
-BIT_0x66 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    bit(cpu, &mem[cpu.hl], 4)
+BIT_0x66 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    bit(cpu, mem_get_ptr(mem, cpu.hl), 4)
 }
 
 /*
@@ -4308,7 +4336,7 @@ BIT_0x66 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x67 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x67 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.af, 4)
 }
 
@@ -4318,7 +4346,7 @@ BIT_0x67 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x68 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x68 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.bc, 5)
 }
 
@@ -4328,7 +4356,7 @@ BIT_0x68 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x69 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x69 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.bc, 5)
 }
 
@@ -4338,7 +4366,7 @@ BIT_0x69 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x6a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x6a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.de, 5)
 }
 
@@ -4348,7 +4376,7 @@ BIT_0x6a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x6b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x6b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.de, 5)
 }
 
@@ -4358,7 +4386,7 @@ BIT_0x6b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x6c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x6c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.hl, 5)
 }
 
@@ -4368,7 +4396,7 @@ BIT_0x6c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x6d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x6d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.hl, 5)
 }
 
@@ -4378,8 +4406,8 @@ BIT_0x6d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: Z 0 1 -
  */
-BIT_0x6e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    bit(cpu, &mem[cpu.hl], 5)
+BIT_0x6e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    bit(cpu, mem_get_ptr(mem, cpu.hl), 5)
 }
 
 /*
@@ -4388,7 +4416,7 @@ BIT_0x6e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x6f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x6f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.af, 5)
 }
 
@@ -4398,7 +4426,7 @@ BIT_0x6f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x70 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x70 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.bc, 6)
 }
 
@@ -4408,7 +4436,7 @@ BIT_0x70 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x71 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x71 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.bc, 6)
 }
 
@@ -4418,7 +4446,7 @@ BIT_0x71 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x72 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x72 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.de, 6)
 }
 
@@ -4428,7 +4456,7 @@ BIT_0x72 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x73 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x73 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.de, 6)
 }
 
@@ -4438,7 +4466,7 @@ BIT_0x73 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x74 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x74 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.hl, 6)
 }
 
@@ -4448,7 +4476,7 @@ BIT_0x74 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x75 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x75 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.hl, 6)
 }
 
@@ -4458,8 +4486,8 @@ BIT_0x75 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: Z 0 1 -
  */
-BIT_0x76 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    bit(cpu, &mem[cpu.hl], 6)
+BIT_0x76 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    bit(cpu, mem_get_ptr(mem, cpu.hl), 6)
 }
 
 /*
@@ -4468,7 +4496,7 @@ BIT_0x76 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x77 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x77 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.af, 6)
 }
 
@@ -4478,7 +4506,7 @@ BIT_0x77 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x78 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x78 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.bc, 7)
 }
 
@@ -4488,7 +4516,7 @@ BIT_0x78 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x79 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x79 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.bc, 7)
 }
 
@@ -4498,7 +4526,7 @@ BIT_0x79 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x7a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x7a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.de, 7)
 }
 
@@ -4508,7 +4536,7 @@ BIT_0x7a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x7b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x7b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.de, 7)
 }
 
@@ -4518,7 +4546,7 @@ BIT_0x7b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x7c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x7c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.hl, 7)
 }
 
@@ -4528,7 +4556,7 @@ BIT_0x7c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x7d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x7d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_low(cpu, &cpu.hl, 7)
 }
 
@@ -4538,8 +4566,8 @@ BIT_0x7d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: Z 0 1 -
  */
-BIT_0x7e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    bit(cpu, &mem[cpu.hl], 7)
+BIT_0x7e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    bit(cpu, mem_get_ptr(mem, cpu.hl), 7)
 }
 
 /*
@@ -4548,7 +4576,7 @@ BIT_0x7e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: Z 0 1 -
  */
-BIT_0x7f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+BIT_0x7f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     bit_register_high(cpu, &cpu.af, 7)
 }
 
@@ -4558,7 +4586,7 @@ BIT_0x7f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x80 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x80 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.bc, 0)
 }
 
@@ -4568,7 +4596,7 @@ RES_0x80 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x81 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x81 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.bc, 0)
 }
 
@@ -4578,7 +4606,7 @@ RES_0x81 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x82 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x82 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.de, 0)
 }
 
@@ -4588,7 +4616,7 @@ RES_0x82 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x83 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x83 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.de, 0)
 }
 
@@ -4598,7 +4626,7 @@ RES_0x83 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x84 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x84 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.hl, 0)
 }
 
@@ -4608,7 +4636,7 @@ RES_0x84 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x85 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x85 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.hl, 0)
 }
 
@@ -4618,8 +4646,8 @@ RES_0x85 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-RES_0x86 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    res(cpu, &mem[cpu.hl], 0)
+RES_0x86 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    res(cpu, mem_get_ptr(mem, cpu.hl), 0)
 }
 
 /*
@@ -4628,7 +4656,7 @@ RES_0x86 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x87 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x87 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.af, 0)
 }
 
@@ -4638,7 +4666,7 @@ RES_0x87 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x88 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x88 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.bc, 1)
 }
 
@@ -4648,7 +4676,7 @@ RES_0x88 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x89 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x89 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.bc, 1)
 }
 
@@ -4658,7 +4686,7 @@ RES_0x89 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x8a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x8a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.de, 1)
 }
 
@@ -4668,7 +4696,7 @@ RES_0x8a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x8b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x8b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.de, 1)
 }
 
@@ -4678,7 +4706,7 @@ RES_0x8b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x8c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x8c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.hl, 1)
 }
 
@@ -4688,7 +4716,7 @@ RES_0x8c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x8d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x8d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.hl, 1)
 }
 
@@ -4698,8 +4726,8 @@ RES_0x8d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-RES_0x8e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    res(cpu, &mem[cpu.hl], 1)
+RES_0x8e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    res(cpu, mem_get_ptr(mem, cpu.hl), 1)
 }
 
 /*
@@ -4708,7 +4736,7 @@ RES_0x8e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x8f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x8f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.af, 1)
 }
 
@@ -4718,7 +4746,7 @@ RES_0x8f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x90 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x90 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.bc, 2)
 }
 
@@ -4728,7 +4756,7 @@ RES_0x90 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x91 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x91 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.bc, 2)
 }
 
@@ -4738,7 +4766,7 @@ RES_0x91 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x92 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x92 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.de, 2)
 }
 
@@ -4748,7 +4776,7 @@ RES_0x92 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x93 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x93 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.de, 2)
 }
 
@@ -4758,7 +4786,7 @@ RES_0x93 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x94 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x94 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.hl, 2)
 }
 
@@ -4768,7 +4796,7 @@ RES_0x94 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x95 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x95 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.hl, 2)
 }
 
@@ -4778,8 +4806,8 @@ RES_0x95 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-RES_0x96 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    res(cpu, &mem[cpu.hl], 2)
+RES_0x96 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    res(cpu, mem_get_ptr(mem, cpu.hl), 2)
 }
 
 /*
@@ -4788,7 +4816,7 @@ RES_0x96 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x97 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x97 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.af, 2)
 }
 
@@ -4798,7 +4826,7 @@ RES_0x97 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x98 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x98 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.bc, 3)
 }
 
@@ -4808,7 +4836,7 @@ RES_0x98 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x99 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x99 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.bc, 3)
 }
 
@@ -4818,7 +4846,7 @@ RES_0x99 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x9a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x9a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.de, 3)
 }
 
@@ -4828,7 +4856,7 @@ RES_0x9a :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x9b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x9b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.de, 3)
 }
 
@@ -4838,7 +4866,7 @@ RES_0x9b :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x9c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x9c :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.hl, 3)
 }
 
@@ -4848,7 +4876,7 @@ RES_0x9c :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x9d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x9d :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.hl, 3)
 }
 
@@ -4858,8 +4886,8 @@ RES_0x9d :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-RES_0x9e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    res(cpu, &mem[cpu.hl], 3)
+RES_0x9e :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    res(cpu, mem_get_ptr(mem, cpu.hl), 3)
 }
 
 /*
@@ -4868,7 +4896,7 @@ RES_0x9e :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0x9f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0x9f :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.af, 3)
 }
 
@@ -4878,7 +4906,7 @@ RES_0x9f :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xa0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xa0 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.bc, 4)
 }
 
@@ -4888,7 +4916,7 @@ RES_0xa0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xa1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xa1 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.bc, 4)
 }
 
@@ -4898,7 +4926,7 @@ RES_0xa1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xa2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xa2 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.de, 4)
 }
 
@@ -4908,7 +4936,7 @@ RES_0xa2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xa3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xa3 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.de, 4)
 }
 
@@ -4918,7 +4946,7 @@ RES_0xa3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xa4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xa4 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.hl, 4)
 }
 
@@ -4928,7 +4956,7 @@ RES_0xa4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xa5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xa5 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.hl, 4)
 }
 
@@ -4938,8 +4966,8 @@ RES_0xa5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-RES_0xa6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    res(cpu, &mem[cpu.hl], 4)
+RES_0xa6 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    res(cpu, mem_get_ptr(mem, cpu.hl), 4)
 }
 
 /*
@@ -4948,7 +4976,7 @@ RES_0xa6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xa7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xa7 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.af, 4)
 }
 
@@ -4958,7 +4986,7 @@ RES_0xa7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xa8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xa8 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.bc, 5)
 }
 
@@ -4968,7 +4996,7 @@ RES_0xa8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xa9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xa9 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.bc, 5)
 }
 
@@ -4978,7 +5006,7 @@ RES_0xa9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xaa :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xaa :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.de, 5)
 }
 
@@ -4988,7 +5016,7 @@ RES_0xaa :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xab :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xab :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.de, 5)
 }
 
@@ -4998,7 +5026,7 @@ RES_0xab :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xac :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xac :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.hl, 5)
 }
 
@@ -5008,7 +5036,7 @@ RES_0xac :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xad :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xad :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.hl, 5)
 }
 
@@ -5018,8 +5046,8 @@ RES_0xad :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-RES_0xae :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    res(cpu, &mem[cpu.hl], 5)
+RES_0xae :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    res(cpu, mem_get_ptr(mem, cpu.hl), 5)
 }
 
 /*
@@ -5028,7 +5056,7 @@ RES_0xae :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xaf :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xaf :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.af, 5)
 }
 
@@ -5038,7 +5066,7 @@ RES_0xaf :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xb0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xb0 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.bc, 6)
 }
 
@@ -5048,7 +5076,7 @@ RES_0xb0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xb1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xb1 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.bc, 6)
 }
 
@@ -5058,7 +5086,7 @@ RES_0xb1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xb2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xb2 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.de, 6)
 }
 
@@ -5068,7 +5096,7 @@ RES_0xb2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xb3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xb3 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.de, 6)
 }
 
@@ -5078,7 +5106,7 @@ RES_0xb3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xb4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xb4 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.hl, 6)
 }
 
@@ -5088,7 +5116,7 @@ RES_0xb4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xb5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xb5 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.hl, 6)
 }
 
@@ -5098,8 +5126,8 @@ RES_0xb5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-RES_0xb6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    res(cpu, &mem[cpu.hl], 6)
+RES_0xb6 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    res(cpu, mem_get_ptr(mem, cpu.hl), 6)
 }
 
 /*
@@ -5108,7 +5136,7 @@ RES_0xb6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xb7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xb7 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.af, 6)
 }
 
@@ -5118,7 +5146,7 @@ RES_0xb7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xb8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xb8 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.bc, 7)
 }
 
@@ -5128,7 +5156,7 @@ RES_0xb8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xb9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xb9 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.bc, 7)
 }
 
@@ -5138,7 +5166,7 @@ RES_0xb9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xba :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xba :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.de, 7)
 }
 
@@ -5148,7 +5176,7 @@ RES_0xba :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xbb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xbb :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.de, 7)
 }
 
@@ -5158,7 +5186,7 @@ RES_0xbb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xbc :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xbc :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.hl, 7)
 }
 
@@ -5168,7 +5196,7 @@ RES_0xbc :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xbd :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xbd :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_low(cpu, &cpu.hl, 7)
 }
 
@@ -5178,8 +5206,8 @@ RES_0xbd :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-RES_0xbe :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    res(cpu, &mem[cpu.hl], 7)
+RES_0xbe :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    res(cpu, mem_get_ptr(mem, cpu.hl), 7)
 }
 
 /*
@@ -5188,7 +5216,7 @@ RES_0xbe :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-RES_0xbf :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+RES_0xbf :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     res_register_high(cpu, &cpu.af, 7)
 }
 
@@ -5198,7 +5226,7 @@ RES_0xbf :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xc0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xc0 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.bc, 0)
 }
 
@@ -5208,7 +5236,7 @@ SET_0xc0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xc1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xc1 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.bc, 0)
 }
 
@@ -5218,7 +5246,7 @@ SET_0xc1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xc2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xc2 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.de, 0)
 }
 
@@ -5228,7 +5256,7 @@ SET_0xc2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xc3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xc3 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.de, 0)
 }
 
@@ -5238,7 +5266,7 @@ SET_0xc3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xc4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xc4 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.hl, 0)
 }
 
@@ -5248,7 +5276,7 @@ SET_0xc4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xc5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xc5 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.hl, 0)
 }
 
@@ -5258,8 +5286,8 @@ SET_0xc5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-SET_0xc6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    set(cpu, &mem[cpu.hl], 0)
+SET_0xc6 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    set(cpu, mem_get_ptr(mem, cpu.hl), 0)
 }
 
 /*
@@ -5268,7 +5296,7 @@ SET_0xc6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xc7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xc7 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.af, 0)
 }
 
@@ -5278,7 +5306,7 @@ SET_0xc7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xc8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xc8 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.bc, 1)
 }
 
@@ -5288,7 +5316,7 @@ SET_0xc8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xc9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xc9 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.bc, 1)
 }
 
@@ -5298,7 +5326,7 @@ SET_0xc9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xca :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xca :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.de, 1)
 }
 
@@ -5308,7 +5336,7 @@ SET_0xca :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xcb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xcb :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.de, 1)
 }
 
@@ -5318,7 +5346,7 @@ SET_0xcb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xcc :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xcc :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.hl, 1)
 }
 
@@ -5328,7 +5356,7 @@ SET_0xcc :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xcd :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xcd :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.hl, 1)
 }
 
@@ -5338,8 +5366,8 @@ SET_0xcd :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-SET_0xce :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    set(cpu, &mem[cpu.hl], 1)
+SET_0xce :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    set(cpu, mem_get_ptr(mem, cpu.hl), 1)
 }
 
 /*
@@ -5348,7 +5376,7 @@ SET_0xce :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xcf :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xcf :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.af, 1)
 }
 
@@ -5358,7 +5386,7 @@ SET_0xcf :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xd0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xd0 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.bc, 2)
 }
 
@@ -5368,7 +5396,7 @@ SET_0xd0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xd1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xd1 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.bc, 2)
 }
 
@@ -5378,7 +5406,7 @@ SET_0xd1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xd2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xd2 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.de, 2)
 }
 
@@ -5388,7 +5416,7 @@ SET_0xd2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xd3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xd3 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.de, 2)
 }
 
@@ -5398,7 +5426,7 @@ SET_0xd3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xd4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xd4 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.hl, 2)
 }
 
@@ -5408,7 +5436,7 @@ SET_0xd4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xd5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xd5 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.hl, 2)
 }
 
@@ -5418,8 +5446,8 @@ SET_0xd5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-SET_0xd6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    set(cpu, &mem[cpu.hl], 2)
+SET_0xd6 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    set(cpu, mem_get_ptr(mem, cpu.hl), 2)
 }
 
 /*
@@ -5428,7 +5456,7 @@ SET_0xd6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xd7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xd7 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.af, 2)
 }
 
@@ -5438,7 +5466,7 @@ SET_0xd7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xd8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xd8 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.bc, 3)
 }
 
@@ -5448,7 +5476,7 @@ SET_0xd8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xd9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xd9 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.bc, 3)
 }
 
@@ -5458,7 +5486,7 @@ SET_0xd9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xda :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xda :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.de, 3)
 }
 
@@ -5468,7 +5496,7 @@ SET_0xda :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xdb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xdb :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.de, 3)
 }
 
@@ -5478,7 +5506,7 @@ SET_0xdb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xdc :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xdc :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.hl, 3)
 }
 
@@ -5488,7 +5516,7 @@ SET_0xdc :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xdd :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xdd :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.hl, 3)
 }
 
@@ -5498,8 +5526,8 @@ SET_0xdd :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-SET_0xde :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    set(cpu, &mem[cpu.hl], 3)
+SET_0xde :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    set(cpu, mem_get_ptr(mem, cpu.hl), 3)
 }
 
 /*
@@ -5508,7 +5536,7 @@ SET_0xde :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xdf :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xdf :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.af, 3)
 }
 
@@ -5518,7 +5546,7 @@ SET_0xdf :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xe0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xe0 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.bc, 4)
 }
 
@@ -5528,7 +5556,7 @@ SET_0xe0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xe1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xe1 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.bc, 4)
 }
 
@@ -5538,7 +5566,7 @@ SET_0xe1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xe2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xe2 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.de, 4)
 }
 
@@ -5548,7 +5576,7 @@ SET_0xe2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xe3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xe3 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.de, 4)
 }
 
@@ -5558,7 +5586,7 @@ SET_0xe3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xe4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xe4 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.hl, 4)
 }
 
@@ -5568,7 +5596,7 @@ SET_0xe4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xe5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xe5 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.hl, 4)
 }
 
@@ -5578,8 +5606,8 @@ SET_0xe5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-SET_0xe6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    set(cpu, &mem[cpu.hl], 4)
+SET_0xe6 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    set(cpu, mem_get_ptr(mem, cpu.hl), 4)
 }
 
 /*
@@ -5588,7 +5616,7 @@ SET_0xe6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xe7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xe7 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.af, 4)
 }
 
@@ -5598,7 +5626,7 @@ SET_0xe7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xe8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xe8 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.bc, 5)
 }
 
@@ -5608,7 +5636,7 @@ SET_0xe8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xe9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xe9 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.bc, 5)
 }
 
@@ -5618,7 +5646,7 @@ SET_0xe9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xea :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xea :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.de, 5)
 }
 
@@ -5628,7 +5656,7 @@ SET_0xea :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xeb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xeb :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.de, 5)
 }
 
@@ -5638,7 +5666,7 @@ SET_0xeb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xec :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xec :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.hl, 5)
 }
 
@@ -5648,7 +5676,7 @@ SET_0xec :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xed :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xed :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.hl, 5)
 }
 
@@ -5658,8 +5686,8 @@ SET_0xed :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-SET_0xee :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    set(cpu, &mem[cpu.hl], 5)
+SET_0xee :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    set(cpu, mem_get_ptr(mem, cpu.hl), 5)
 }
 
 /*
@@ -5668,7 +5696,7 @@ SET_0xee :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xef :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xef :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.af, 5)
 }
 
@@ -5678,7 +5706,7 @@ SET_0xef :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xf0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xf0 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.bc, 6)
 }
 
@@ -5688,7 +5716,7 @@ SET_0xf0 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xf1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xf1 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.bc, 6)
 }
 
@@ -5698,7 +5726,7 @@ SET_0xf1 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xf2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xf2 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.de, 6)
 }
 
@@ -5708,7 +5736,7 @@ SET_0xf2 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xf3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xf3 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.de, 6)
 }
 
@@ -5718,7 +5746,7 @@ SET_0xf3 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xf4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xf4 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.hl, 6)
 }
 
@@ -5728,7 +5756,7 @@ SET_0xf4 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xf5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xf5 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.hl, 6)
 }
 
@@ -5738,8 +5766,8 @@ SET_0xf5 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-SET_0xf6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    set(cpu, &mem[cpu.hl], 6)
+SET_0xf6 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    set(cpu, mem_get_ptr(mem, cpu.hl), 6)
 }
 
 /*
@@ -5748,7 +5776,7 @@ SET_0xf6 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xf7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xf7 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.af, 6)
 }
 
@@ -5758,7 +5786,7 @@ SET_0xf7 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xf8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xf8 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.bc, 7)
 }
 
@@ -5768,7 +5796,7 @@ SET_0xf8 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xf9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xf9 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.bc, 7)
 }
 
@@ -5778,7 +5806,7 @@ SET_0xf9 :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xfa :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xfa :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.de, 7)
 }
 
@@ -5788,7 +5816,7 @@ SET_0xfa :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xfb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xfb :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.de, 7)
 }
 
@@ -5798,7 +5826,7 @@ SET_0xfb :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xfc :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xfc :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.hl, 7)
 }
 
@@ -5808,7 +5836,7 @@ SET_0xfc :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xfd :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xfd :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_low(cpu, &cpu.hl, 7)
 }
 
@@ -5818,8 +5846,8 @@ SET_0xfd :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 16
    Flags: - - - -
  */
-SET_0xfe :: proc(cpu: ^CPU, mem: []u8, data: u16) {
-    set(cpu, &mem[cpu.hl], 7)
+SET_0xfe :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+    set(cpu, mem_get_ptr(mem, cpu.hl), 7)
 }
 
 /*
@@ -5828,7 +5856,7 @@ SET_0xfe :: proc(cpu: ^CPU, mem: []u8, data: u16) {
    Cycles: 8
    Flags: - - - -
  */
-SET_0xff :: proc(cpu: ^CPU, mem: []u8, data: u16) {
+SET_0xff :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     set_register_high(cpu, &cpu.af, 7)
 }
 
@@ -6081,260 +6109,260 @@ create_unprefixed_instructions :: proc(cpu: ^CPU) {
 }
 
 create_prefixed_instructions :: proc(cpu: ^CPU) {
-    cpu.prefixed_instructions[0x00] = Instruction{2, 8, "RLC B", RLC_0x00}
-    cpu.prefixed_instructions[0x01] = Instruction{2, 8, "RLC C", RLC_0x01}
-    cpu.prefixed_instructions[0x02] = Instruction{2, 8, "RLC D", RLC_0x02}
-    cpu.prefixed_instructions[0x03] = Instruction{2, 8, "RLC E", RLC_0x03}
-    cpu.prefixed_instructions[0x04] = Instruction{2, 8, "RLC H", RLC_0x04}
-    cpu.prefixed_instructions[0x05] = Instruction{2, 8, "RLC L", RLC_0x05}
-    cpu.prefixed_instructions[0x06] = Instruction{2, 16, "RLC (HL)", RLC_0x06}
-    cpu.prefixed_instructions[0x07] = Instruction{2, 8, "RLC A", RLC_0x07}
-    cpu.prefixed_instructions[0x08] = Instruction{2, 8, "RRC B", RRC_0x08}
-    cpu.prefixed_instructions[0x09] = Instruction{2, 8, "RRC C", RRC_0x09}
-    cpu.prefixed_instructions[0x0a] = Instruction{2, 8, "RRC D", RRC_0x0a}
-    cpu.prefixed_instructions[0x0b] = Instruction{2, 8, "RRC E", RRC_0x0b}
-    cpu.prefixed_instructions[0x0c] = Instruction{2, 8, "RRC H", RRC_0x0c}
-    cpu.prefixed_instructions[0x0d] = Instruction{2, 8, "RRC L", RRC_0x0d}
-    cpu.prefixed_instructions[0x0e] = Instruction{2, 16, "RRC (HL)", RRC_0x0e}
-    cpu.prefixed_instructions[0x0f] = Instruction{2, 8, "RRC A", RRC_0x0f}
-    cpu.prefixed_instructions[0x10] = Instruction{2, 8, "RL B", RL_0x10}
-    cpu.prefixed_instructions[0x11] = Instruction{2, 8, "RL C", RL_0x11}
-    cpu.prefixed_instructions[0x12] = Instruction{2, 8, "RL D", RL_0x12}
-    cpu.prefixed_instructions[0x13] = Instruction{2, 8, "RL E", RL_0x13}
-    cpu.prefixed_instructions[0x14] = Instruction{2, 8, "RL H", RL_0x14}
-    cpu.prefixed_instructions[0x15] = Instruction{2, 8, "RL L", RL_0x15}
-    cpu.prefixed_instructions[0x16] = Instruction{2, 16, "RL (HL)", RL_0x16}
-    cpu.prefixed_instructions[0x17] = Instruction{2, 8, "RL A", RL_0x17}
-    cpu.prefixed_instructions[0x18] = Instruction{2, 8, "RR B", RR_0x18}
-    cpu.prefixed_instructions[0x19] = Instruction{2, 8, "RR C", RR_0x19}
-    cpu.prefixed_instructions[0x1a] = Instruction{2, 8, "RR D", RR_0x1a}
-    cpu.prefixed_instructions[0x1b] = Instruction{2, 8, "RR E", RR_0x1b}
-    cpu.prefixed_instructions[0x1c] = Instruction{2, 8, "RR H", RR_0x1c}
-    cpu.prefixed_instructions[0x1d] = Instruction{2, 8, "RR L", RR_0x1d}
-    cpu.prefixed_instructions[0x1e] = Instruction{2, 16, "RR (HL)", RR_0x1e}
-    cpu.prefixed_instructions[0x1f] = Instruction{2, 8, "RR A", RR_0x1f}
-    cpu.prefixed_instructions[0x20] = Instruction{2, 8, "SLA B", SLA_0x20}
-    cpu.prefixed_instructions[0x21] = Instruction{2, 8, "SLA C", SLA_0x21}
-    cpu.prefixed_instructions[0x22] = Instruction{2, 8, "SLA D", SLA_0x22}
-    cpu.prefixed_instructions[0x23] = Instruction{2, 8, "SLA E", SLA_0x23}
-    cpu.prefixed_instructions[0x24] = Instruction{2, 8, "SLA H", SLA_0x24}
-    cpu.prefixed_instructions[0x25] = Instruction{2, 8, "SLA L", SLA_0x25}
-    cpu.prefixed_instructions[0x26] = Instruction{2, 16, "SLA (HL)", SLA_0x26}
-    cpu.prefixed_instructions[0x27] = Instruction{2, 8, "SLA A", SLA_0x27}
-    cpu.prefixed_instructions[0x28] = Instruction{2, 8, "SRA B", SRA_0x28}
-    cpu.prefixed_instructions[0x29] = Instruction{2, 8, "SRA C", SRA_0x29}
-    cpu.prefixed_instructions[0x2a] = Instruction{2, 8, "SRA D", SRA_0x2a}
-    cpu.prefixed_instructions[0x2b] = Instruction{2, 8, "SRA E", SRA_0x2b}
-    cpu.prefixed_instructions[0x2c] = Instruction{2, 8, "SRA H", SRA_0x2c}
-    cpu.prefixed_instructions[0x2d] = Instruction{2, 8, "SRA L", SRA_0x2d}
-    cpu.prefixed_instructions[0x2e] = Instruction{2, 16, "SRA (HL)", SRA_0x2e}
-    cpu.prefixed_instructions[0x2f] = Instruction{2, 8, "SRA A", SRA_0x2f}
-    cpu.prefixed_instructions[0x30] = Instruction{2, 8, "SWAP B", SWAP_0x30}
-    cpu.prefixed_instructions[0x31] = Instruction{2, 8, "SWAP C", SWAP_0x31}
-    cpu.prefixed_instructions[0x32] = Instruction{2, 8, "SWAP D", SWAP_0x32}
-    cpu.prefixed_instructions[0x33] = Instruction{2, 8, "SWAP E", SWAP_0x33}
-    cpu.prefixed_instructions[0x34] = Instruction{2, 8, "SWAP H", SWAP_0x34}
-    cpu.prefixed_instructions[0x35] = Instruction{2, 8, "SWAP L", SWAP_0x35}
-    cpu.prefixed_instructions[0x36] = Instruction{2, 16, "SWAP (HL)", SWAP_0x36}
-    cpu.prefixed_instructions[0x37] = Instruction{2, 8, "SWAP A", SWAP_0x37}
-    cpu.prefixed_instructions[0x38] = Instruction{2, 8, "SRL B", SRL_0x38}
-    cpu.prefixed_instructions[0x39] = Instruction{2, 8, "SRL C", SRL_0x39}
-    cpu.prefixed_instructions[0x3a] = Instruction{2, 8, "SRL D", SRL_0x3a}
-    cpu.prefixed_instructions[0x3b] = Instruction{2, 8, "SRL E", SRL_0x3b}
-    cpu.prefixed_instructions[0x3c] = Instruction{2, 8, "SRL H", SRL_0x3c}
-    cpu.prefixed_instructions[0x3d] = Instruction{2, 8, "SRL L", SRL_0x3d}
-    cpu.prefixed_instructions[0x3e] = Instruction{2, 16, "SRL (HL)", SRL_0x3e}
-    cpu.prefixed_instructions[0x3f] = Instruction{2, 8, "SRL A", SRL_0x3f}
-    cpu.prefixed_instructions[0x40] = Instruction{2, 8, "BIT 0 B", BIT_0x40}
-    cpu.prefixed_instructions[0x41] = Instruction{2, 8, "BIT 0 C", BIT_0x41}
-    cpu.prefixed_instructions[0x42] = Instruction{2, 8, "BIT 0 D", BIT_0x42}
-    cpu.prefixed_instructions[0x43] = Instruction{2, 8, "BIT 0 E", BIT_0x43}
-    cpu.prefixed_instructions[0x44] = Instruction{2, 8, "BIT 0 H", BIT_0x44}
-    cpu.prefixed_instructions[0x45] = Instruction{2, 8, "BIT 0 L", BIT_0x45}
-    cpu.prefixed_instructions[0x46] = Instruction{2, 16, "BIT 0 (HL)", BIT_0x46}
-    cpu.prefixed_instructions[0x47] = Instruction{2, 8, "BIT 0 A", BIT_0x47}
-    cpu.prefixed_instructions[0x48] = Instruction{2, 8, "BIT 1 B", BIT_0x48}
-    cpu.prefixed_instructions[0x49] = Instruction{2, 8, "BIT 1 C", BIT_0x49}
-    cpu.prefixed_instructions[0x4a] = Instruction{2, 8, "BIT 1 D", BIT_0x4a}
-    cpu.prefixed_instructions[0x4b] = Instruction{2, 8, "BIT 1 E", BIT_0x4b}
-    cpu.prefixed_instructions[0x4c] = Instruction{2, 8, "BIT 1 H", BIT_0x4c}
-    cpu.prefixed_instructions[0x4d] = Instruction{2, 8, "BIT 1 L", BIT_0x4d}
-    cpu.prefixed_instructions[0x4e] = Instruction{2, 16, "BIT 1 (HL)", BIT_0x4e}
-    cpu.prefixed_instructions[0x4f] = Instruction{2, 8, "BIT 1 A", BIT_0x4f}
-    cpu.prefixed_instructions[0x50] = Instruction{2, 8, "BIT 2 B", BIT_0x50}
-    cpu.prefixed_instructions[0x51] = Instruction{2, 8, "BIT 2 C", BIT_0x51}
-    cpu.prefixed_instructions[0x52] = Instruction{2, 8, "BIT 2 D", BIT_0x52}
-    cpu.prefixed_instructions[0x53] = Instruction{2, 8, "BIT 2 E", BIT_0x53}
-    cpu.prefixed_instructions[0x54] = Instruction{2, 8, "BIT 2 H", BIT_0x54}
-    cpu.prefixed_instructions[0x55] = Instruction{2, 8, "BIT 2 L", BIT_0x55}
-    cpu.prefixed_instructions[0x56] = Instruction{2, 16, "BIT 2 (HL)", BIT_0x56}
-    cpu.prefixed_instructions[0x57] = Instruction{2, 8, "BIT 2 A", BIT_0x57}
-    cpu.prefixed_instructions[0x58] = Instruction{2, 8, "BIT 3 B", BIT_0x58}
-    cpu.prefixed_instructions[0x59] = Instruction{2, 8, "BIT 3 C", BIT_0x59}
-    cpu.prefixed_instructions[0x5a] = Instruction{2, 8, "BIT 3 D", BIT_0x5a}
-    cpu.prefixed_instructions[0x5b] = Instruction{2, 8, "BIT 3 E", BIT_0x5b}
-    cpu.prefixed_instructions[0x5c] = Instruction{2, 8, "BIT 3 H", BIT_0x5c}
-    cpu.prefixed_instructions[0x5d] = Instruction{2, 8, "BIT 3 L", BIT_0x5d}
-    cpu.prefixed_instructions[0x5e] = Instruction{2, 16, "BIT 3 (HL)", BIT_0x5e}
-    cpu.prefixed_instructions[0x5f] = Instruction{2, 8, "BIT 3 A", BIT_0x5f}
-    cpu.prefixed_instructions[0x60] = Instruction{2, 8, "BIT 4 B", BIT_0x60}
-    cpu.prefixed_instructions[0x61] = Instruction{2, 8, "BIT 4 C", BIT_0x61}
-    cpu.prefixed_instructions[0x62] = Instruction{2, 8, "BIT 4 D", BIT_0x62}
-    cpu.prefixed_instructions[0x63] = Instruction{2, 8, "BIT 4 E", BIT_0x63}
-    cpu.prefixed_instructions[0x64] = Instruction{2, 8, "BIT 4 H", BIT_0x64}
-    cpu.prefixed_instructions[0x65] = Instruction{2, 8, "BIT 4 L", BIT_0x65}
-    cpu.prefixed_instructions[0x66] = Instruction{2, 16, "BIT 4 (HL)", BIT_0x66}
-    cpu.prefixed_instructions[0x67] = Instruction{2, 8, "BIT 4 A", BIT_0x67}
-    cpu.prefixed_instructions[0x68] = Instruction{2, 8, "BIT 5 B", BIT_0x68}
-    cpu.prefixed_instructions[0x69] = Instruction{2, 8, "BIT 5 C", BIT_0x69}
-    cpu.prefixed_instructions[0x6a] = Instruction{2, 8, "BIT 5 D", BIT_0x6a}
-    cpu.prefixed_instructions[0x6b] = Instruction{2, 8, "BIT 5 E", BIT_0x6b}
-    cpu.prefixed_instructions[0x6c] = Instruction{2, 8, "BIT 5 H", BIT_0x6c}
-    cpu.prefixed_instructions[0x6d] = Instruction{2, 8, "BIT 5 L", BIT_0x6d}
-    cpu.prefixed_instructions[0x6e] = Instruction{2, 16, "BIT 5 (HL)", BIT_0x6e}
-    cpu.prefixed_instructions[0x6f] = Instruction{2, 8, "BIT 5 A", BIT_0x6f}
-    cpu.prefixed_instructions[0x70] = Instruction{2, 8, "BIT 6 B", BIT_0x70}
-    cpu.prefixed_instructions[0x71] = Instruction{2, 8, "BIT 6 C", BIT_0x71}
-    cpu.prefixed_instructions[0x72] = Instruction{2, 8, "BIT 6 D", BIT_0x72}
-    cpu.prefixed_instructions[0x73] = Instruction{2, 8, "BIT 6 E", BIT_0x73}
-    cpu.prefixed_instructions[0x74] = Instruction{2, 8, "BIT 6 H", BIT_0x74}
-    cpu.prefixed_instructions[0x75] = Instruction{2, 8, "BIT 6 L", BIT_0x75}
-    cpu.prefixed_instructions[0x76] = Instruction{2, 16, "BIT 6 (HL)", BIT_0x76}
-    cpu.prefixed_instructions[0x77] = Instruction{2, 8, "BIT 6 A", BIT_0x77}
-    cpu.prefixed_instructions[0x78] = Instruction{2, 8, "BIT 7 B", BIT_0x78}
-    cpu.prefixed_instructions[0x79] = Instruction{2, 8, "BIT 7 C", BIT_0x79}
-    cpu.prefixed_instructions[0x7a] = Instruction{2, 8, "BIT 7 D", BIT_0x7a}
-    cpu.prefixed_instructions[0x7b] = Instruction{2, 8, "BIT 7 E", BIT_0x7b}
-    cpu.prefixed_instructions[0x7c] = Instruction{2, 8, "BIT 7 H", BIT_0x7c}
-    cpu.prefixed_instructions[0x7d] = Instruction{2, 8, "BIT 7 L", BIT_0x7d}
-    cpu.prefixed_instructions[0x7e] = Instruction{2, 16, "BIT 7 (HL)", BIT_0x7e}
-    cpu.prefixed_instructions[0x7f] = Instruction{2, 8, "BIT 7 A", BIT_0x7f}
-    cpu.prefixed_instructions[0x80] = Instruction{2, 8, "RES 0 B", RES_0x80}
-    cpu.prefixed_instructions[0x81] = Instruction{2, 8, "RES 0 C", RES_0x81}
-    cpu.prefixed_instructions[0x82] = Instruction{2, 8, "RES 0 D", RES_0x82}
-    cpu.prefixed_instructions[0x83] = Instruction{2, 8, "RES 0 E", RES_0x83}
-    cpu.prefixed_instructions[0x84] = Instruction{2, 8, "RES 0 H", RES_0x84}
-    cpu.prefixed_instructions[0x85] = Instruction{2, 8, "RES 0 L", RES_0x85}
-    cpu.prefixed_instructions[0x86] = Instruction{2, 16, "RES 0 (HL)", RES_0x86}
-    cpu.prefixed_instructions[0x87] = Instruction{2, 8, "RES 0 A", RES_0x87}
-    cpu.prefixed_instructions[0x88] = Instruction{2, 8, "RES 1 B", RES_0x88}
-    cpu.prefixed_instructions[0x89] = Instruction{2, 8, "RES 1 C", RES_0x89}
-    cpu.prefixed_instructions[0x8a] = Instruction{2, 8, "RES 1 D", RES_0x8a}
-    cpu.prefixed_instructions[0x8b] = Instruction{2, 8, "RES 1 E", RES_0x8b}
-    cpu.prefixed_instructions[0x8c] = Instruction{2, 8, "RES 1 H", RES_0x8c}
-    cpu.prefixed_instructions[0x8d] = Instruction{2, 8, "RES 1 L", RES_0x8d}
-    cpu.prefixed_instructions[0x8e] = Instruction{2, 16, "RES 1 (HL)", RES_0x8e}
-    cpu.prefixed_instructions[0x8f] = Instruction{2, 8, "RES 1 A", RES_0x8f}
-    cpu.prefixed_instructions[0x90] = Instruction{2, 8, "RES 2 B", RES_0x90}
-    cpu.prefixed_instructions[0x91] = Instruction{2, 8, "RES 2 C", RES_0x91}
-    cpu.prefixed_instructions[0x92] = Instruction{2, 8, "RES 2 D", RES_0x92}
-    cpu.prefixed_instructions[0x93] = Instruction{2, 8, "RES 2 E", RES_0x93}
-    cpu.prefixed_instructions[0x94] = Instruction{2, 8, "RES 2 H", RES_0x94}
-    cpu.prefixed_instructions[0x95] = Instruction{2, 8, "RES 2 L", RES_0x95}
-    cpu.prefixed_instructions[0x96] = Instruction{2, 16, "RES 2 (HL)", RES_0x96}
-    cpu.prefixed_instructions[0x97] = Instruction{2, 8, "RES 2 A", RES_0x97}
-    cpu.prefixed_instructions[0x98] = Instruction{2, 8, "RES 3 B", RES_0x98}
-    cpu.prefixed_instructions[0x99] = Instruction{2, 8, "RES 3 C", RES_0x99}
-    cpu.prefixed_instructions[0x9a] = Instruction{2, 8, "RES 3 D", RES_0x9a}
-    cpu.prefixed_instructions[0x9b] = Instruction{2, 8, "RES 3 E", RES_0x9b}
-    cpu.prefixed_instructions[0x9c] = Instruction{2, 8, "RES 3 H", RES_0x9c}
-    cpu.prefixed_instructions[0x9d] = Instruction{2, 8, "RES 3 L", RES_0x9d}
-    cpu.prefixed_instructions[0x9e] = Instruction{2, 16, "RES 3 (HL)", RES_0x9e}
-    cpu.prefixed_instructions[0x9f] = Instruction{2, 8, "RES 3 A", RES_0x9f}
-    cpu.prefixed_instructions[0xa0] = Instruction{2, 8, "RES 4 B", RES_0xa0}
-    cpu.prefixed_instructions[0xa1] = Instruction{2, 8, "RES 4 C", RES_0xa1}
-    cpu.prefixed_instructions[0xa2] = Instruction{2, 8, "RES 4 D", RES_0xa2}
-    cpu.prefixed_instructions[0xa3] = Instruction{2, 8, "RES 4 E", RES_0xa3}
-    cpu.prefixed_instructions[0xa4] = Instruction{2, 8, "RES 4 H", RES_0xa4}
-    cpu.prefixed_instructions[0xa5] = Instruction{2, 8, "RES 4 L", RES_0xa5}
-    cpu.prefixed_instructions[0xa6] = Instruction{2, 16, "RES 4 (HL)", RES_0xa6}
-    cpu.prefixed_instructions[0xa7] = Instruction{2, 8, "RES 4 A", RES_0xa7}
-    cpu.prefixed_instructions[0xa8] = Instruction{2, 8, "RES 5 B", RES_0xa8}
-    cpu.prefixed_instructions[0xa9] = Instruction{2, 8, "RES 5 C", RES_0xa9}
-    cpu.prefixed_instructions[0xaa] = Instruction{2, 8, "RES 5 D", RES_0xaa}
-    cpu.prefixed_instructions[0xab] = Instruction{2, 8, "RES 5 E", RES_0xab}
-    cpu.prefixed_instructions[0xac] = Instruction{2, 8, "RES 5 H", RES_0xac}
-    cpu.prefixed_instructions[0xad] = Instruction{2, 8, "RES 5 L", RES_0xad}
-    cpu.prefixed_instructions[0xae] = Instruction{2, 16, "RES 5 (HL)", RES_0xae}
-    cpu.prefixed_instructions[0xaf] = Instruction{2, 8, "RES 5 A", RES_0xaf}
-    cpu.prefixed_instructions[0xb0] = Instruction{2, 8, "RES 6 B", RES_0xb0}
-    cpu.prefixed_instructions[0xb1] = Instruction{2, 8, "RES 6 C", RES_0xb1}
-    cpu.prefixed_instructions[0xb2] = Instruction{2, 8, "RES 6 D", RES_0xb2}
-    cpu.prefixed_instructions[0xb3] = Instruction{2, 8, "RES 6 E", RES_0xb3}
-    cpu.prefixed_instructions[0xb4] = Instruction{2, 8, "RES 6 H", RES_0xb4}
-    cpu.prefixed_instructions[0xb5] = Instruction{2, 8, "RES 6 L", RES_0xb5}
-    cpu.prefixed_instructions[0xb6] = Instruction{2, 16, "RES 6 (HL)", RES_0xb6}
-    cpu.prefixed_instructions[0xb7] = Instruction{2, 8, "RES 6 A", RES_0xb7}
-    cpu.prefixed_instructions[0xb8] = Instruction{2, 8, "RES 7 B", RES_0xb8}
-    cpu.prefixed_instructions[0xb9] = Instruction{2, 8, "RES 7 C", RES_0xb9}
-    cpu.prefixed_instructions[0xba] = Instruction{2, 8, "RES 7 D", RES_0xba}
-    cpu.prefixed_instructions[0xbb] = Instruction{2, 8, "RES 7 E", RES_0xbb}
-    cpu.prefixed_instructions[0xbc] = Instruction{2, 8, "RES 7 H", RES_0xbc}
-    cpu.prefixed_instructions[0xbd] = Instruction{2, 8, "RES 7 L", RES_0xbd}
-    cpu.prefixed_instructions[0xbe] = Instruction{2, 16, "RES 7 (HL)", RES_0xbe}
-    cpu.prefixed_instructions[0xbf] = Instruction{2, 8, "RES 7 A", RES_0xbf}
-    cpu.prefixed_instructions[0xc0] = Instruction{2, 8, "SET 0 B", SET_0xc0}
-    cpu.prefixed_instructions[0xc1] = Instruction{2, 8, "SET 0 C", SET_0xc1}
-    cpu.prefixed_instructions[0xc2] = Instruction{2, 8, "SET 0 D", SET_0xc2}
-    cpu.prefixed_instructions[0xc3] = Instruction{2, 8, "SET 0 E", SET_0xc3}
-    cpu.prefixed_instructions[0xc4] = Instruction{2, 8, "SET 0 H", SET_0xc4}
-    cpu.prefixed_instructions[0xc5] = Instruction{2, 8, "SET 0 L", SET_0xc5}
-    cpu.prefixed_instructions[0xc6] = Instruction{2, 16, "SET 0 (HL)", SET_0xc6}
-    cpu.prefixed_instructions[0xc7] = Instruction{2, 8, "SET 0 A", SET_0xc7}
-    cpu.prefixed_instructions[0xc8] = Instruction{2, 8, "SET 1 B", SET_0xc8}
-    cpu.prefixed_instructions[0xc9] = Instruction{2, 8, "SET 1 C", SET_0xc9}
-    cpu.prefixed_instructions[0xca] = Instruction{2, 8, "SET 1 D", SET_0xca}
-    cpu.prefixed_instructions[0xcb] = Instruction{2, 8, "SET 1 E", SET_0xcb}
-    cpu.prefixed_instructions[0xcc] = Instruction{2, 8, "SET 1 H", SET_0xcc}
-    cpu.prefixed_instructions[0xcd] = Instruction{2, 8, "SET 1 L", SET_0xcd}
-    cpu.prefixed_instructions[0xce] = Instruction{2, 16, "SET 1 (HL)", SET_0xce}
-    cpu.prefixed_instructions[0xcf] = Instruction{2, 8, "SET 1 A", SET_0xcf}
-    cpu.prefixed_instructions[0xd0] = Instruction{2, 8, "SET 2 B", SET_0xd0}
-    cpu.prefixed_instructions[0xd1] = Instruction{2, 8, "SET 2 C", SET_0xd1}
-    cpu.prefixed_instructions[0xd2] = Instruction{2, 8, "SET 2 D", SET_0xd2}
-    cpu.prefixed_instructions[0xd3] = Instruction{2, 8, "SET 2 E", SET_0xd3}
-    cpu.prefixed_instructions[0xd4] = Instruction{2, 8, "SET 2 H", SET_0xd4}
-    cpu.prefixed_instructions[0xd5] = Instruction{2, 8, "SET 2 L", SET_0xd5}
-    cpu.prefixed_instructions[0xd6] = Instruction{2, 16, "SET 2 (HL)", SET_0xd6}
-    cpu.prefixed_instructions[0xd7] = Instruction{2, 8, "SET 2 A", SET_0xd7}
-    cpu.prefixed_instructions[0xd8] = Instruction{2, 8, "SET 3 B", SET_0xd8}
-    cpu.prefixed_instructions[0xd9] = Instruction{2, 8, "SET 3 C", SET_0xd9}
-    cpu.prefixed_instructions[0xda] = Instruction{2, 8, "SET 3 D", SET_0xda}
-    cpu.prefixed_instructions[0xdb] = Instruction{2, 8, "SET 3 E", SET_0xdb}
-    cpu.prefixed_instructions[0xdc] = Instruction{2, 8, "SET 3 H", SET_0xdc}
-    cpu.prefixed_instructions[0xdd] = Instruction{2, 8, "SET 3 L", SET_0xdd}
-    cpu.prefixed_instructions[0xde] = Instruction{2, 16, "SET 3 (HL)", SET_0xde}
-    cpu.prefixed_instructions[0xdf] = Instruction{2, 8, "SET 3 A", SET_0xdf}
-    cpu.prefixed_instructions[0xe0] = Instruction{2, 8, "SET 4 B", SET_0xe0}
-    cpu.prefixed_instructions[0xe1] = Instruction{2, 8, "SET 4 C", SET_0xe1}
-    cpu.prefixed_instructions[0xe2] = Instruction{2, 8, "SET 4 D", SET_0xe2}
-    cpu.prefixed_instructions[0xe3] = Instruction{2, 8, "SET 4 E", SET_0xe3}
-    cpu.prefixed_instructions[0xe4] = Instruction{2, 8, "SET 4 H", SET_0xe4}
-    cpu.prefixed_instructions[0xe5] = Instruction{2, 8, "SET 4 L", SET_0xe5}
-    cpu.prefixed_instructions[0xe6] = Instruction{2, 16, "SET 4 (HL)", SET_0xe6}
-    cpu.prefixed_instructions[0xe7] = Instruction{2, 8, "SET 4 A", SET_0xe7}
-    cpu.prefixed_instructions[0xe8] = Instruction{2, 8, "SET 5 B", SET_0xe8}
-    cpu.prefixed_instructions[0xe9] = Instruction{2, 8, "SET 5 C", SET_0xe9}
-    cpu.prefixed_instructions[0xea] = Instruction{2, 8, "SET 5 D", SET_0xea}
-    cpu.prefixed_instructions[0xeb] = Instruction{2, 8, "SET 5 E", SET_0xeb}
-    cpu.prefixed_instructions[0xec] = Instruction{2, 8, "SET 5 H", SET_0xec}
-    cpu.prefixed_instructions[0xed] = Instruction{2, 8, "SET 5 L", SET_0xed}
-    cpu.prefixed_instructions[0xee] = Instruction{2, 16, "SET 5 (HL)", SET_0xee}
-    cpu.prefixed_instructions[0xef] = Instruction{2, 8, "SET 5 A", SET_0xef}
-    cpu.prefixed_instructions[0xf0] = Instruction{2, 8, "SET 6 B", SET_0xf0}
-    cpu.prefixed_instructions[0xf1] = Instruction{2, 8, "SET 6 C", SET_0xf1}
-    cpu.prefixed_instructions[0xf2] = Instruction{2, 8, "SET 6 D", SET_0xf2}
-    cpu.prefixed_instructions[0xf3] = Instruction{2, 8, "SET 6 E", SET_0xf3}
-    cpu.prefixed_instructions[0xf4] = Instruction{2, 8, "SET 6 H", SET_0xf4}
-    cpu.prefixed_instructions[0xf5] = Instruction{2, 8, "SET 6 L", SET_0xf5}
-    cpu.prefixed_instructions[0xf6] = Instruction{2, 16, "SET 6 (HL)", SET_0xf6}
-    cpu.prefixed_instructions[0xf7] = Instruction{2, 8, "SET 6 A", SET_0xf7}
-    cpu.prefixed_instructions[0xf8] = Instruction{2, 8, "SET 7 B", SET_0xf8}
-    cpu.prefixed_instructions[0xf9] = Instruction{2, 8, "SET 7 C", SET_0xf9}
-    cpu.prefixed_instructions[0xfa] = Instruction{2, 8, "SET 7 D", SET_0xfa}
-    cpu.prefixed_instructions[0xfb] = Instruction{2, 8, "SET 7 E", SET_0xfb}
-    cpu.prefixed_instructions[0xfc] = Instruction{2, 8, "SET 7 H", SET_0xfc}
-    cpu.prefixed_instructions[0xfd] = Instruction{2, 8, "SET 7 L", SET_0xfd}
-    cpu.prefixed_instructions[0xfe] = Instruction{2, 16, "SET 7 (HL)", SET_0xfe}
-    cpu.prefixed_instructions[0xff] = Instruction{2, 8, "SET 7 A", SET_0xff}
+    cpu.prefixed_instructions[0x00] = Instruction{1, 8, "RLC B", RLC_0x00}
+    cpu.prefixed_instructions[0x01] = Instruction{1, 8, "RLC C", RLC_0x01}
+    cpu.prefixed_instructions[0x02] = Instruction{1, 8, "RLC D", RLC_0x02}
+    cpu.prefixed_instructions[0x03] = Instruction{1, 8, "RLC E", RLC_0x03}
+    cpu.prefixed_instructions[0x04] = Instruction{1, 8, "RLC H", RLC_0x04}
+    cpu.prefixed_instructions[0x05] = Instruction{1, 8, "RLC L", RLC_0x05}
+    cpu.prefixed_instructions[0x06] = Instruction{1, 16, "RLC (HL)", RLC_0x06}
+    cpu.prefixed_instructions[0x07] = Instruction{1, 8, "RLC A", RLC_0x07}
+    cpu.prefixed_instructions[0x08] = Instruction{1, 8, "RRC B", RRC_0x08}
+    cpu.prefixed_instructions[0x09] = Instruction{1, 8, "RRC C", RRC_0x09}
+    cpu.prefixed_instructions[0x0a] = Instruction{1, 8, "RRC D", RRC_0x0a}
+    cpu.prefixed_instructions[0x0b] = Instruction{1, 8, "RRC E", RRC_0x0b}
+    cpu.prefixed_instructions[0x0c] = Instruction{1, 8, "RRC H", RRC_0x0c}
+    cpu.prefixed_instructions[0x0d] = Instruction{1, 8, "RRC L", RRC_0x0d}
+    cpu.prefixed_instructions[0x0e] = Instruction{1, 16, "RRC (HL)", RRC_0x0e}
+    cpu.prefixed_instructions[0x0f] = Instruction{1, 8, "RRC A", RRC_0x0f}
+    cpu.prefixed_instructions[0x10] = Instruction{1, 8, "RL B", RL_0x10}
+    cpu.prefixed_instructions[0x11] = Instruction{1, 8, "RL C", RL_0x11}
+    cpu.prefixed_instructions[0x12] = Instruction{1, 8, "RL D", RL_0x12}
+    cpu.prefixed_instructions[0x13] = Instruction{1, 8, "RL E", RL_0x13}
+    cpu.prefixed_instructions[0x14] = Instruction{1, 8, "RL H", RL_0x14}
+    cpu.prefixed_instructions[0x15] = Instruction{1, 8, "RL L", RL_0x15}
+    cpu.prefixed_instructions[0x16] = Instruction{1, 16, "RL (HL)", RL_0x16}
+    cpu.prefixed_instructions[0x17] = Instruction{1, 8, "RL A", RL_0x17}
+    cpu.prefixed_instructions[0x18] = Instruction{1, 8, "RR B", RR_0x18}
+    cpu.prefixed_instructions[0x19] = Instruction{1, 8, "RR C", RR_0x19}
+    cpu.prefixed_instructions[0x1a] = Instruction{1, 8, "RR D", RR_0x1a}
+    cpu.prefixed_instructions[0x1b] = Instruction{1, 8, "RR E", RR_0x1b}
+    cpu.prefixed_instructions[0x1c] = Instruction{1, 8, "RR H", RR_0x1c}
+    cpu.prefixed_instructions[0x1d] = Instruction{1, 8, "RR L", RR_0x1d}
+    cpu.prefixed_instructions[0x1e] = Instruction{1, 16, "RR (HL)", RR_0x1e}
+    cpu.prefixed_instructions[0x1f] = Instruction{1, 8, "RR A", RR_0x1f}
+    cpu.prefixed_instructions[0x20] = Instruction{1, 8, "SLA B", SLA_0x20}
+    cpu.prefixed_instructions[0x21] = Instruction{1, 8, "SLA C", SLA_0x21}
+    cpu.prefixed_instructions[0x22] = Instruction{1, 8, "SLA D", SLA_0x22}
+    cpu.prefixed_instructions[0x23] = Instruction{1, 8, "SLA E", SLA_0x23}
+    cpu.prefixed_instructions[0x24] = Instruction{1, 8, "SLA H", SLA_0x24}
+    cpu.prefixed_instructions[0x25] = Instruction{1, 8, "SLA L", SLA_0x25}
+    cpu.prefixed_instructions[0x26] = Instruction{1, 16, "SLA (HL)", SLA_0x26}
+    cpu.prefixed_instructions[0x27] = Instruction{1, 8, "SLA A", SLA_0x27}
+    cpu.prefixed_instructions[0x28] = Instruction{1, 8, "SRA B", SRA_0x28}
+    cpu.prefixed_instructions[0x29] = Instruction{1, 8, "SRA C", SRA_0x29}
+    cpu.prefixed_instructions[0x2a] = Instruction{1, 8, "SRA D", SRA_0x2a}
+    cpu.prefixed_instructions[0x2b] = Instruction{1, 8, "SRA E", SRA_0x2b}
+    cpu.prefixed_instructions[0x2c] = Instruction{1, 8, "SRA H", SRA_0x2c}
+    cpu.prefixed_instructions[0x2d] = Instruction{1, 8, "SRA L", SRA_0x2d}
+    cpu.prefixed_instructions[0x2e] = Instruction{1, 16, "SRA (HL)", SRA_0x2e}
+    cpu.prefixed_instructions[0x2f] = Instruction{1, 8, "SRA A", SRA_0x2f}
+    cpu.prefixed_instructions[0x30] = Instruction{1, 8, "SWAP B", SWAP_0x30}
+    cpu.prefixed_instructions[0x31] = Instruction{1, 8, "SWAP C", SWAP_0x31}
+    cpu.prefixed_instructions[0x32] = Instruction{1, 8, "SWAP D", SWAP_0x32}
+    cpu.prefixed_instructions[0x33] = Instruction{1, 8, "SWAP E", SWAP_0x33}
+    cpu.prefixed_instructions[0x34] = Instruction{1, 8, "SWAP H", SWAP_0x34}
+    cpu.prefixed_instructions[0x35] = Instruction{1, 8, "SWAP L", SWAP_0x35}
+    cpu.prefixed_instructions[0x36] = Instruction{1, 16, "SWAP (HL)", SWAP_0x36}
+    cpu.prefixed_instructions[0x37] = Instruction{1, 8, "SWAP A", SWAP_0x37}
+    cpu.prefixed_instructions[0x38] = Instruction{1, 8, "SRL B", SRL_0x38}
+    cpu.prefixed_instructions[0x39] = Instruction{1, 8, "SRL C", SRL_0x39}
+    cpu.prefixed_instructions[0x3a] = Instruction{1, 8, "SRL D", SRL_0x3a}
+    cpu.prefixed_instructions[0x3b] = Instruction{1, 8, "SRL E", SRL_0x3b}
+    cpu.prefixed_instructions[0x3c] = Instruction{1, 8, "SRL H", SRL_0x3c}
+    cpu.prefixed_instructions[0x3d] = Instruction{1, 8, "SRL L", SRL_0x3d}
+    cpu.prefixed_instructions[0x3e] = Instruction{1, 16, "SRL (HL)", SRL_0x3e}
+    cpu.prefixed_instructions[0x3f] = Instruction{1, 8, "SRL A", SRL_0x3f}
+    cpu.prefixed_instructions[0x40] = Instruction{1, 8, "BIT 0 B", BIT_0x40}
+    cpu.prefixed_instructions[0x41] = Instruction{1, 8, "BIT 0 C", BIT_0x41}
+    cpu.prefixed_instructions[0x42] = Instruction{1, 8, "BIT 0 D", BIT_0x42}
+    cpu.prefixed_instructions[0x43] = Instruction{1, 8, "BIT 0 E", BIT_0x43}
+    cpu.prefixed_instructions[0x44] = Instruction{1, 8, "BIT 0 H", BIT_0x44}
+    cpu.prefixed_instructions[0x45] = Instruction{1, 8, "BIT 0 L", BIT_0x45}
+    cpu.prefixed_instructions[0x46] = Instruction{1, 16, "BIT 0 (HL)", BIT_0x46}
+    cpu.prefixed_instructions[0x47] = Instruction{1, 8, "BIT 0 A", BIT_0x47}
+    cpu.prefixed_instructions[0x48] = Instruction{1, 8, "BIT 1 B", BIT_0x48}
+    cpu.prefixed_instructions[0x49] = Instruction{1, 8, "BIT 1 C", BIT_0x49}
+    cpu.prefixed_instructions[0x4a] = Instruction{1, 8, "BIT 1 D", BIT_0x4a}
+    cpu.prefixed_instructions[0x4b] = Instruction{1, 8, "BIT 1 E", BIT_0x4b}
+    cpu.prefixed_instructions[0x4c] = Instruction{1, 8, "BIT 1 H", BIT_0x4c}
+    cpu.prefixed_instructions[0x4d] = Instruction{1, 8, "BIT 1 L", BIT_0x4d}
+    cpu.prefixed_instructions[0x4e] = Instruction{1, 16, "BIT 1 (HL)", BIT_0x4e}
+    cpu.prefixed_instructions[0x4f] = Instruction{1, 8, "BIT 1 A", BIT_0x4f}
+    cpu.prefixed_instructions[0x50] = Instruction{1, 8, "BIT 2 B", BIT_0x50}
+    cpu.prefixed_instructions[0x51] = Instruction{1, 8, "BIT 2 C", BIT_0x51}
+    cpu.prefixed_instructions[0x52] = Instruction{1, 8, "BIT 2 D", BIT_0x52}
+    cpu.prefixed_instructions[0x53] = Instruction{1, 8, "BIT 2 E", BIT_0x53}
+    cpu.prefixed_instructions[0x54] = Instruction{1, 8, "BIT 2 H", BIT_0x54}
+    cpu.prefixed_instructions[0x55] = Instruction{1, 8, "BIT 2 L", BIT_0x55}
+    cpu.prefixed_instructions[0x56] = Instruction{1, 16, "BIT 2 (HL)", BIT_0x56}
+    cpu.prefixed_instructions[0x57] = Instruction{1, 8, "BIT 2 A", BIT_0x57}
+    cpu.prefixed_instructions[0x58] = Instruction{1, 8, "BIT 3 B", BIT_0x58}
+    cpu.prefixed_instructions[0x59] = Instruction{1, 8, "BIT 3 C", BIT_0x59}
+    cpu.prefixed_instructions[0x5a] = Instruction{1, 8, "BIT 3 D", BIT_0x5a}
+    cpu.prefixed_instructions[0x5b] = Instruction{1, 8, "BIT 3 E", BIT_0x5b}
+    cpu.prefixed_instructions[0x5c] = Instruction{1, 8, "BIT 3 H", BIT_0x5c}
+    cpu.prefixed_instructions[0x5d] = Instruction{1, 8, "BIT 3 L", BIT_0x5d}
+    cpu.prefixed_instructions[0x5e] = Instruction{1, 16, "BIT 3 (HL)", BIT_0x5e}
+    cpu.prefixed_instructions[0x5f] = Instruction{1, 8, "BIT 3 A", BIT_0x5f}
+    cpu.prefixed_instructions[0x60] = Instruction{1, 8, "BIT 4 B", BIT_0x60}
+    cpu.prefixed_instructions[0x61] = Instruction{1, 8, "BIT 4 C", BIT_0x61}
+    cpu.prefixed_instructions[0x62] = Instruction{1, 8, "BIT 4 D", BIT_0x62}
+    cpu.prefixed_instructions[0x63] = Instruction{1, 8, "BIT 4 E", BIT_0x63}
+    cpu.prefixed_instructions[0x64] = Instruction{1, 8, "BIT 4 H", BIT_0x64}
+    cpu.prefixed_instructions[0x65] = Instruction{1, 8, "BIT 4 L", BIT_0x65}
+    cpu.prefixed_instructions[0x66] = Instruction{1, 16, "BIT 4 (HL)", BIT_0x66}
+    cpu.prefixed_instructions[0x67] = Instruction{1, 8, "BIT 4 A", BIT_0x67}
+    cpu.prefixed_instructions[0x68] = Instruction{1, 8, "BIT 5 B", BIT_0x68}
+    cpu.prefixed_instructions[0x69] = Instruction{1, 8, "BIT 5 C", BIT_0x69}
+    cpu.prefixed_instructions[0x6a] = Instruction{1, 8, "BIT 5 D", BIT_0x6a}
+    cpu.prefixed_instructions[0x6b] = Instruction{1, 8, "BIT 5 E", BIT_0x6b}
+    cpu.prefixed_instructions[0x6c] = Instruction{1, 8, "BIT 5 H", BIT_0x6c}
+    cpu.prefixed_instructions[0x6d] = Instruction{1, 8, "BIT 5 L", BIT_0x6d}
+    cpu.prefixed_instructions[0x6e] = Instruction{1, 16, "BIT 5 (HL)", BIT_0x6e}
+    cpu.prefixed_instructions[0x6f] = Instruction{1, 8, "BIT 5 A", BIT_0x6f}
+    cpu.prefixed_instructions[0x70] = Instruction{1, 8, "BIT 6 B", BIT_0x70}
+    cpu.prefixed_instructions[0x71] = Instruction{1, 8, "BIT 6 C", BIT_0x71}
+    cpu.prefixed_instructions[0x72] = Instruction{1, 8, "BIT 6 D", BIT_0x72}
+    cpu.prefixed_instructions[0x73] = Instruction{1, 8, "BIT 6 E", BIT_0x73}
+    cpu.prefixed_instructions[0x74] = Instruction{1, 8, "BIT 6 H", BIT_0x74}
+    cpu.prefixed_instructions[0x75] = Instruction{1, 8, "BIT 6 L", BIT_0x75}
+    cpu.prefixed_instructions[0x76] = Instruction{1, 16, "BIT 6 (HL)", BIT_0x76}
+    cpu.prefixed_instructions[0x77] = Instruction{1, 8, "BIT 6 A", BIT_0x77}
+    cpu.prefixed_instructions[0x78] = Instruction{1, 8, "BIT 7 B", BIT_0x78}
+    cpu.prefixed_instructions[0x79] = Instruction{1, 8, "BIT 7 C", BIT_0x79}
+    cpu.prefixed_instructions[0x7a] = Instruction{1, 8, "BIT 7 D", BIT_0x7a}
+    cpu.prefixed_instructions[0x7b] = Instruction{1, 8, "BIT 7 E", BIT_0x7b}
+    cpu.prefixed_instructions[0x7c] = Instruction{1, 8, "BIT 7 H", BIT_0x7c}
+    cpu.prefixed_instructions[0x7d] = Instruction{1, 8, "BIT 7 L", BIT_0x7d}
+    cpu.prefixed_instructions[0x7e] = Instruction{1, 16, "BIT 7 (HL)", BIT_0x7e}
+    cpu.prefixed_instructions[0x7f] = Instruction{1, 8, "BIT 7 A", BIT_0x7f}
+    cpu.prefixed_instructions[0x80] = Instruction{1, 8, "RES 0 B", RES_0x80}
+    cpu.prefixed_instructions[0x81] = Instruction{1, 8, "RES 0 C", RES_0x81}
+    cpu.prefixed_instructions[0x82] = Instruction{1, 8, "RES 0 D", RES_0x82}
+    cpu.prefixed_instructions[0x83] = Instruction{1, 8, "RES 0 E", RES_0x83}
+    cpu.prefixed_instructions[0x84] = Instruction{1, 8, "RES 0 H", RES_0x84}
+    cpu.prefixed_instructions[0x85] = Instruction{1, 8, "RES 0 L", RES_0x85}
+    cpu.prefixed_instructions[0x86] = Instruction{1, 16, "RES 0 (HL)", RES_0x86}
+    cpu.prefixed_instructions[0x87] = Instruction{1, 8, "RES 0 A", RES_0x87}
+    cpu.prefixed_instructions[0x88] = Instruction{1, 8, "RES 1 B", RES_0x88}
+    cpu.prefixed_instructions[0x89] = Instruction{1, 8, "RES 1 C", RES_0x89}
+    cpu.prefixed_instructions[0x8a] = Instruction{1, 8, "RES 1 D", RES_0x8a}
+    cpu.prefixed_instructions[0x8b] = Instruction{1, 8, "RES 1 E", RES_0x8b}
+    cpu.prefixed_instructions[0x8c] = Instruction{1, 8, "RES 1 H", RES_0x8c}
+    cpu.prefixed_instructions[0x8d] = Instruction{1, 8, "RES 1 L", RES_0x8d}
+    cpu.prefixed_instructions[0x8e] = Instruction{1, 16, "RES 1 (HL)", RES_0x8e}
+    cpu.prefixed_instructions[0x8f] = Instruction{1, 8, "RES 1 A", RES_0x8f}
+    cpu.prefixed_instructions[0x90] = Instruction{1, 8, "RES 2 B", RES_0x90}
+    cpu.prefixed_instructions[0x91] = Instruction{1, 8, "RES 2 C", RES_0x91}
+    cpu.prefixed_instructions[0x92] = Instruction{1, 8, "RES 2 D", RES_0x92}
+    cpu.prefixed_instructions[0x93] = Instruction{1, 8, "RES 2 E", RES_0x93}
+    cpu.prefixed_instructions[0x94] = Instruction{1, 8, "RES 2 H", RES_0x94}
+    cpu.prefixed_instructions[0x95] = Instruction{1, 8, "RES 2 L", RES_0x95}
+    cpu.prefixed_instructions[0x96] = Instruction{1, 16, "RES 2 (HL)", RES_0x96}
+    cpu.prefixed_instructions[0x97] = Instruction{1, 8, "RES 2 A", RES_0x97}
+    cpu.prefixed_instructions[0x98] = Instruction{1, 8, "RES 3 B", RES_0x98}
+    cpu.prefixed_instructions[0x99] = Instruction{1, 8, "RES 3 C", RES_0x99}
+    cpu.prefixed_instructions[0x9a] = Instruction{1, 8, "RES 3 D", RES_0x9a}
+    cpu.prefixed_instructions[0x9b] = Instruction{1, 8, "RES 3 E", RES_0x9b}
+    cpu.prefixed_instructions[0x9c] = Instruction{1, 8, "RES 3 H", RES_0x9c}
+    cpu.prefixed_instructions[0x9d] = Instruction{1, 8, "RES 3 L", RES_0x9d}
+    cpu.prefixed_instructions[0x9e] = Instruction{1, 16, "RES 3 (HL)", RES_0x9e}
+    cpu.prefixed_instructions[0x9f] = Instruction{1, 8, "RES 3 A", RES_0x9f}
+    cpu.prefixed_instructions[0xa0] = Instruction{1, 8, "RES 4 B", RES_0xa0}
+    cpu.prefixed_instructions[0xa1] = Instruction{1, 8, "RES 4 C", RES_0xa1}
+    cpu.prefixed_instructions[0xa2] = Instruction{1, 8, "RES 4 D", RES_0xa2}
+    cpu.prefixed_instructions[0xa3] = Instruction{1, 8, "RES 4 E", RES_0xa3}
+    cpu.prefixed_instructions[0xa4] = Instruction{1, 8, "RES 4 H", RES_0xa4}
+    cpu.prefixed_instructions[0xa5] = Instruction{1, 8, "RES 4 L", RES_0xa5}
+    cpu.prefixed_instructions[0xa6] = Instruction{1, 16, "RES 4 (HL)", RES_0xa6}
+    cpu.prefixed_instructions[0xa7] = Instruction{1, 8, "RES 4 A", RES_0xa7}
+    cpu.prefixed_instructions[0xa8] = Instruction{1, 8, "RES 5 B", RES_0xa8}
+    cpu.prefixed_instructions[0xa9] = Instruction{1, 8, "RES 5 C", RES_0xa9}
+    cpu.prefixed_instructions[0xaa] = Instruction{1, 8, "RES 5 D", RES_0xaa}
+    cpu.prefixed_instructions[0xab] = Instruction{1, 8, "RES 5 E", RES_0xab}
+    cpu.prefixed_instructions[0xac] = Instruction{1, 8, "RES 5 H", RES_0xac}
+    cpu.prefixed_instructions[0xad] = Instruction{1, 8, "RES 5 L", RES_0xad}
+    cpu.prefixed_instructions[0xae] = Instruction{1, 16, "RES 5 (HL)", RES_0xae}
+    cpu.prefixed_instructions[0xaf] = Instruction{1, 8, "RES 5 A", RES_0xaf}
+    cpu.prefixed_instructions[0xb0] = Instruction{1, 8, "RES 6 B", RES_0xb0}
+    cpu.prefixed_instructions[0xb1] = Instruction{1, 8, "RES 6 C", RES_0xb1}
+    cpu.prefixed_instructions[0xb2] = Instruction{1, 8, "RES 6 D", RES_0xb2}
+    cpu.prefixed_instructions[0xb3] = Instruction{1, 8, "RES 6 E", RES_0xb3}
+    cpu.prefixed_instructions[0xb4] = Instruction{1, 8, "RES 6 H", RES_0xb4}
+    cpu.prefixed_instructions[0xb5] = Instruction{1, 8, "RES 6 L", RES_0xb5}
+    cpu.prefixed_instructions[0xb6] = Instruction{1, 16, "RES 6 (HL)", RES_0xb6}
+    cpu.prefixed_instructions[0xb7] = Instruction{1, 8, "RES 6 A", RES_0xb7}
+    cpu.prefixed_instructions[0xb8] = Instruction{1, 8, "RES 7 B", RES_0xb8}
+    cpu.prefixed_instructions[0xb9] = Instruction{1, 8, "RES 7 C", RES_0xb9}
+    cpu.prefixed_instructions[0xba] = Instruction{1, 8, "RES 7 D", RES_0xba}
+    cpu.prefixed_instructions[0xbb] = Instruction{1, 8, "RES 7 E", RES_0xbb}
+    cpu.prefixed_instructions[0xbc] = Instruction{1, 8, "RES 7 H", RES_0xbc}
+    cpu.prefixed_instructions[0xbd] = Instruction{1, 8, "RES 7 L", RES_0xbd}
+    cpu.prefixed_instructions[0xbe] = Instruction{1, 16, "RES 7 (HL)", RES_0xbe}
+    cpu.prefixed_instructions[0xbf] = Instruction{1, 8, "RES 7 A", RES_0xbf}
+    cpu.prefixed_instructions[0xc0] = Instruction{1, 8, "SET 0 B", SET_0xc0}
+    cpu.prefixed_instructions[0xc1] = Instruction{1, 8, "SET 0 C", SET_0xc1}
+    cpu.prefixed_instructions[0xc2] = Instruction{1, 8, "SET 0 D", SET_0xc2}
+    cpu.prefixed_instructions[0xc3] = Instruction{1, 8, "SET 0 E", SET_0xc3}
+    cpu.prefixed_instructions[0xc4] = Instruction{1, 8, "SET 0 H", SET_0xc4}
+    cpu.prefixed_instructions[0xc5] = Instruction{1, 8, "SET 0 L", SET_0xc5}
+    cpu.prefixed_instructions[0xc6] = Instruction{1, 16, "SET 0 (HL)", SET_0xc6}
+    cpu.prefixed_instructions[0xc7] = Instruction{1, 8, "SET 0 A", SET_0xc7}
+    cpu.prefixed_instructions[0xc8] = Instruction{1, 8, "SET 1 B", SET_0xc8}
+    cpu.prefixed_instructions[0xc9] = Instruction{1, 8, "SET 1 C", SET_0xc9}
+    cpu.prefixed_instructions[0xca] = Instruction{1, 8, "SET 1 D", SET_0xca}
+    cpu.prefixed_instructions[0xcb] = Instruction{1, 8, "SET 1 E", SET_0xcb}
+    cpu.prefixed_instructions[0xcc] = Instruction{1, 8, "SET 1 H", SET_0xcc}
+    cpu.prefixed_instructions[0xcd] = Instruction{1, 8, "SET 1 L", SET_0xcd}
+    cpu.prefixed_instructions[0xce] = Instruction{1, 16, "SET 1 (HL)", SET_0xce}
+    cpu.prefixed_instructions[0xcf] = Instruction{1, 8, "SET 1 A", SET_0xcf}
+    cpu.prefixed_instructions[0xd0] = Instruction{1, 8, "SET 2 B", SET_0xd0}
+    cpu.prefixed_instructions[0xd1] = Instruction{1, 8, "SET 2 C", SET_0xd1}
+    cpu.prefixed_instructions[0xd2] = Instruction{1, 8, "SET 2 D", SET_0xd2}
+    cpu.prefixed_instructions[0xd3] = Instruction{1, 8, "SET 2 E", SET_0xd3}
+    cpu.prefixed_instructions[0xd4] = Instruction{1, 8, "SET 2 H", SET_0xd4}
+    cpu.prefixed_instructions[0xd5] = Instruction{1, 8, "SET 2 L", SET_0xd5}
+    cpu.prefixed_instructions[0xd6] = Instruction{1, 16, "SET 2 (HL)", SET_0xd6}
+    cpu.prefixed_instructions[0xd7] = Instruction{1, 8, "SET 2 A", SET_0xd7}
+    cpu.prefixed_instructions[0xd8] = Instruction{1, 8, "SET 3 B", SET_0xd8}
+    cpu.prefixed_instructions[0xd9] = Instruction{1, 8, "SET 3 C", SET_0xd9}
+    cpu.prefixed_instructions[0xda] = Instruction{1, 8, "SET 3 D", SET_0xda}
+    cpu.prefixed_instructions[0xdb] = Instruction{1, 8, "SET 3 E", SET_0xdb}
+    cpu.prefixed_instructions[0xdc] = Instruction{1, 8, "SET 3 H", SET_0xdc}
+    cpu.prefixed_instructions[0xdd] = Instruction{1, 8, "SET 3 L", SET_0xdd}
+    cpu.prefixed_instructions[0xde] = Instruction{1, 16, "SET 3 (HL)", SET_0xde}
+    cpu.prefixed_instructions[0xdf] = Instruction{1, 8, "SET 3 A", SET_0xdf}
+    cpu.prefixed_instructions[0xe0] = Instruction{1, 8, "SET 4 B", SET_0xe0}
+    cpu.prefixed_instructions[0xe1] = Instruction{1, 8, "SET 4 C", SET_0xe1}
+    cpu.prefixed_instructions[0xe2] = Instruction{1, 8, "SET 4 D", SET_0xe2}
+    cpu.prefixed_instructions[0xe3] = Instruction{1, 8, "SET 4 E", SET_0xe3}
+    cpu.prefixed_instructions[0xe4] = Instruction{1, 8, "SET 4 H", SET_0xe4}
+    cpu.prefixed_instructions[0xe5] = Instruction{1, 8, "SET 4 L", SET_0xe5}
+    cpu.prefixed_instructions[0xe6] = Instruction{1, 16, "SET 4 (HL)", SET_0xe6}
+    cpu.prefixed_instructions[0xe7] = Instruction{1, 8, "SET 4 A", SET_0xe7}
+    cpu.prefixed_instructions[0xe8] = Instruction{1, 8, "SET 5 B", SET_0xe8}
+    cpu.prefixed_instructions[0xe9] = Instruction{1, 8, "SET 5 C", SET_0xe9}
+    cpu.prefixed_instructions[0xea] = Instruction{1, 8, "SET 5 D", SET_0xea}
+    cpu.prefixed_instructions[0xeb] = Instruction{1, 8, "SET 5 E", SET_0xeb}
+    cpu.prefixed_instructions[0xec] = Instruction{1, 8, "SET 5 H", SET_0xec}
+    cpu.prefixed_instructions[0xed] = Instruction{1, 8, "SET 5 L", SET_0xed}
+    cpu.prefixed_instructions[0xee] = Instruction{1, 16, "SET 5 (HL)", SET_0xee}
+    cpu.prefixed_instructions[0xef] = Instruction{1, 8, "SET 5 A", SET_0xef}
+    cpu.prefixed_instructions[0xf0] = Instruction{1, 8, "SET 6 B", SET_0xf0}
+    cpu.prefixed_instructions[0xf1] = Instruction{1, 8, "SET 6 C", SET_0xf1}
+    cpu.prefixed_instructions[0xf2] = Instruction{1, 8, "SET 6 D", SET_0xf2}
+    cpu.prefixed_instructions[0xf3] = Instruction{1, 8, "SET 6 E", SET_0xf3}
+    cpu.prefixed_instructions[0xf4] = Instruction{1, 8, "SET 6 H", SET_0xf4}
+    cpu.prefixed_instructions[0xf5] = Instruction{1, 8, "SET 6 L", SET_0xf5}
+    cpu.prefixed_instructions[0xf6] = Instruction{1, 16, "SET 6 (HL)", SET_0xf6}
+    cpu.prefixed_instructions[0xf7] = Instruction{1, 8, "SET 6 A", SET_0xf7}
+    cpu.prefixed_instructions[0xf8] = Instruction{1, 8, "SET 7 B", SET_0xf8}
+    cpu.prefixed_instructions[0xf9] = Instruction{1, 8, "SET 7 C", SET_0xf9}
+    cpu.prefixed_instructions[0xfa] = Instruction{1, 8, "SET 7 D", SET_0xfa}
+    cpu.prefixed_instructions[0xfb] = Instruction{1, 8, "SET 7 E", SET_0xfb}
+    cpu.prefixed_instructions[0xfc] = Instruction{1, 8, "SET 7 H", SET_0xfc}
+    cpu.prefixed_instructions[0xfd] = Instruction{1, 8, "SET 7 L", SET_0xfd}
+    cpu.prefixed_instructions[0xfe] = Instruction{1, 16, "SET 7 (HL)", SET_0xfe}
+    cpu.prefixed_instructions[0xff] = Instruction{1, 8, "SET 7 A", SET_0xff}
 }

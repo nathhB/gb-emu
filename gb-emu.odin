@@ -9,10 +9,11 @@ main :: proc() {
     gb := GB{}
 
     gb_init(&gb)
+    // cpu_add_breakpoint(&gb.cpu, 0x55, dump_vram)
 
-    rom_path := "ROMS/tetris.gb" 
+    rom_path := "ROMS/tetris.gb"
 
-    rom, err := gb_load_rom(&gb, rom_path)
+    err := gb_load_rom(&gb, rom_path)
 
     if err != GB_Error.None {
         log.error("Failed to load boot ROM")
