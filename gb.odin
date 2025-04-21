@@ -17,7 +17,7 @@ ScreenHeight :: 144
 BootRomPath :: "ROMS/dmg_boot.gb"
 
 GB :: struct {
-    mem: [0xFFFF+1]u8,
+    mem: GB_Memory,
     cpu: CPU,
     ppu: PPU,
     booted: bool
@@ -25,8 +25,10 @@ GB :: struct {
 
 GB_Error :: enum u32 {
     None,
-    FailedToReadROM,
-    ROMTooBig
+    ROM_FileError,
+    ROM_TooBig,
+    ROM_Unsupported,
+    ROM_FailedToLoadBoot
 }
 
 ROM_Header :: struct {
@@ -55,8 +57,8 @@ gb_run :: proc(gb: ^GB) {
     target_rect := rl.Rectangle{0, 0, f32(rl.GetScreenWidth()), f32(rl.GetScreenHeight())}
 
     for !rl.WindowShouldClose() {
-        if !gb.booted && gb.mem[0xFF50] != 0 {
-            // TODO: unload boot rom?
+        if !gb.booted && mem_read(&gb.mem, 0xFF50) != 0 {
+            unload_boot_rom(gb)
             gb.booted = true
             log.debug("BOOTED")
         }
@@ -78,45 +80,61 @@ gb_run :: proc(gb: ^GB) {
     rl.UnloadTexture(screen_texture.texture)
 }
 
-gb_load_boot_rom :: proc(gb: ^GB) -> GB_Error {
+gb_load_rom :: proc(gb: ^GB, path: string) -> GB_Error {
+    data, success := os.read_entire_file(path)
+
+    if !success {
+        return GB_Error.ROM_FileError
+    } 
+
+    header := read_rom_header(data)
+    rom := make([]u8, header.rom_size)
+
+    switch header.rom_type {
+    case 0:
+        mbc0_init(&gb.mem, rom)
+    case 1:
+        mbc1_init(&gb.mem, rom)
+    case:
+        return GB_Error.ROM_Unsupported
+    }
+
+    if load_boot_rom(gb) != GB_Error.None {
+        return GB_Error.ROM_FailedToLoadBoot
+    }
+
+    copy(gb.mem.data[0x100:], data[0x100:0x4000]) // always load the first 16kb bank 
+
+    if (len(data) > header.rom_size) {
+        return GB_Error.ROM_TooBig
+    }
+
+    copy(gb.mem.rom, data)
+
+    log.infof("Successfully loaded ROM %s (size: %d)", path, len(data))
+    print_rom_info(header)
+
+    return GB_Error.None
+}
+
+load_boot_rom :: proc(gb: ^GB) -> GB_Error {
     data, success := os.read_entire_file(BootRomPath)
 
     if !success {
         return GB_Error.FailedToReadROM
     }
 
-    if (len(data) > len(gb.mem)) {
+    if (len(data) > 0x100) {
         return GB_Error.ROMTooBig
     }
 
-    copy(gb.mem[:], data)
+    copy(gb.mem.data[:], data)
 
     return GB_Error.None
 }
 
-gb_load_rom :: proc(gb: ^GB, path: string) -> GB_Error {
-    data, success := os.read_entire_file(path)
-
-    if !success {
-        return GB_Error.FailedToReadROM
-    }
-
-    if (len(data) > len(gb.mem)) {
-        return GB_Error.ROMTooBig
-    }
-
-    header := read_rom_header(data)
-
-    if header.rom_type > 1 {
-        copy(gb.mem[:], data)
-    } else {
-        panic("unsupported ROM type")
-    }
-
-    log.infof("Successfully loaded ROM %s (size: %d)", path, len(data))
-    print_rom_info(header)
-
-    return GB_Error.None
+unload_boot_rom :: proc(gb: ^GB) {
+    copy(gb.mem.data[0:0x100], gb.mem.rom[0:0x100])
 }
 
 do_frame :: proc(gb: ^GB) {
