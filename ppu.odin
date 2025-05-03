@@ -25,8 +25,8 @@ PPU_Control :: enum {
     OBJ_Size,
     BG_TileMap,
     BG_WindowTiles,
-    WindowEnable,
-    WindowTileMap,
+    Window_Enable,
+    Window_TileMap,
     PPU_Enable
 }
 
@@ -36,18 +36,24 @@ ppu_init :: proc(ppu: ^PPU, mem: ^GB_Memory) {
     ppu.colors = [4]rl.Color{rl.WHITE, rl.BLACK, rl.BLACK, rl.BLACK}
 }
 
-ppu_tick :: proc(ppu: ^PPU, mem: ^GB_Memory, tick: i64) {
+ppu_tick :: proc(gb: ^GB, tick: u64) {
     scanline := int(tick / ScanelineDots)
     scanline_tick := int(tick % ScanelineDots)
+    prev_mode := gb.ppu.mode
 
-    ppu.scanline = scanline
-    ppu.mode = get_mode(ppu.scanline, scanline_tick)
-    mem.write(mem, u16(GB_HardRegister.LY), u8(scanline))
+    gb.ppu.scanline = scanline
+    gb.ppu.mode = get_mode(scanline, scanline_tick)
+    mem_write(&gb.mem, u16(GB_HardRegister.LY), u8(scanline))
 
-    if ppu.mode == PPU_Mode.DrawPixels {
+    if gb.ppu.mode == PPU_Mode.VBlank && prev_mode == PPU_Mode.HBlank {
+        // we just entered VBlank
+        cpu_request_interrupt(&gb.cpu, &gb.mem, Interrupt.VBlank)
+    }
+
+    if gb.ppu.mode == PPU_Mode.DrawPixels {
         x := scanline_tick - 80
 
-        draw_pixel(ppu, mem, x, ppu.scanline)
+        draw_pixel(&gb.ppu, &gb.mem, x, gb.ppu.scanline)
     }
 }
 
@@ -82,15 +88,24 @@ draw_pixel :: proc(ppu: ^PPU, mem: ^GB_Memory, x: int, y: int) {
 }
 
 get_tile_id :: proc(mem: ^GB_Memory, x: int, y: int) -> u8 {
-    // TODO: handle window rendering
-    // for now assume the pixel is never inside the window
+    bg_tilemap_addr: u16 = 0
+    in_window := false
+
+    if get_control_flag(mem, PPU_Control.Window_Enable) {
+        // TODO
+    }
+
+    if in_window {
+        bg_tilemap_addr = get_control_flag(mem, PPU_Control.Window_TileMap) ? 0x9C00 : 0x9800
+    } else {
+        bg_tilemap_addr = get_control_flag(mem, PPU_Control.BG_TileMap) ? 0x9C00 : 0x9800
+    }
 
     tile_x := x / 8
     tile_y := y / 8
-    bg_tilemap_addr := get_control_flag(mem, PPU_Control.BG_TileMap) ? 0x9C00 : 0x9800
     tilemap_offset := (tile_y * 32) + tile_x
 
-    return mem.read(mem, u16(bg_tilemap_addr + tilemap_offset))
+    return mem.read(mem, bg_tilemap_addr + u16(tilemap_offset))
 }
 
 // https://gbdev.io/pandocs/Tile_Data.html

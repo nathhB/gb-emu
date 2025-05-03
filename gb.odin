@@ -6,12 +6,12 @@ import "core:os"
 import "core:mem"
 import rl "vendor:raylib"
 
-DotNs: i64 = 238 // 1 dot = 2^22 Hz, 1 dot = 1 T-Cycle, 1 M-Cycle = 4 T-Cycle
+DotNs: u64 = 238 // 1 dot = 2^22 Hz, 1 dot = 1 T-Cycle, 1 M-Cycle = 4 T-Cycle
 ScanelineDots :: 456
 FrameScanlines :: 154
 FrameDrawScanlines :: 144
-FrameDots: i64 = ScanelineDots * FrameScanlines
-FrameNs: i64 = FrameDots * DotNs
+FrameDots: u64 = ScanelineDots * FrameScanlines
+FrameNs: u64 = FrameDots * DotNs
 ScreenWidth :: 160
 ScreenHeight :: 144
 BootRomPath :: "ROMS/dmg_boot.gb"
@@ -20,7 +20,11 @@ GB :: struct {
     mem: GB_Memory,
     cpu: CPU,
     ppu: PPU,
-    booted: bool
+    booted: bool,
+    div_acc: u64,
+    timer_acc: u64,
+    timer_enabled: bool,
+    timer_dots: u64
 }
 
 GB_Error :: enum u32 {
@@ -47,11 +51,18 @@ GB_HardRegister :: enum u16 {
     LYC = 0xFF45,
     IF = 0xFF0F,
     IE = 0xFFFF,
+    JOYPAD = 0xFF00,
+    DIV = 0xFF04,
+    TIMA = 0xFF05,
+    TMA = 0xFF06,
+    TAC = 0xFF07
 }
 
 gb_init :: proc(gb: ^GB) {
     cpu_init(&gb.cpu)
     ppu_init(&gb.ppu, &gb.mem) 
+
+    gb.mem.data[GB_HardRegister.JOYPAD] = 0xFF
 }
 
 gb_run :: proc(gb: ^GB) {
@@ -63,11 +74,12 @@ gb_run :: proc(gb: ^GB) {
         if !gb.booted && mem_read(&gb.mem, 0xFF50) != 0 {
             unload_boot_rom(gb)
             gb.booted = true
-            log.debug("BOOTED")
         }
 
         if gb.cpu.breakpoint == 0 {
             do_frame(gb)
+        } else {
+            process_debugger_inputs(&gb.cpu)
         }
 
         rl.UpdateTexture(screen_texture.texture, raw_data(gb.ppu.framebuffer[:]))
@@ -77,7 +89,8 @@ gb_run :: proc(gb: ^GB) {
             rl.ClearBackground(rl.LIGHTGRAY)
 
             rl.DrawTexturePro(screen_texture.texture, screen_rect, target_rect, rl.Vector2{0, 0}, 0, rl.WHITE)
-            rl.DrawFPS(0, 0) 
+            rl.DrawFPS(0, 0)
+            draw_debugger_info(gb);
         }
         rl.EndDrawing()
     }
@@ -90,7 +103,7 @@ gb_load_rom :: proc(gb: ^GB, path: string) -> GB_Error {
 
     if !success {
         return GB_Error.ROM_FileError
-    } 
+    }
 
     header := read_rom_header(rom)
 
@@ -142,14 +155,15 @@ unload_boot_rom :: proc(gb: ^GB) {
 }
 
 do_frame :: proc(gb: ^GB) {
-    for t: i64 = 0; t < FrameDots; t += 1 {
+    for t: u64 = 0; t < FrameDots; t += 1 {
         cpu_tick(&gb.cpu, &gb.mem)
 
         if gb.cpu.breakpoint > 0 {
             return
         }
 
-        ppu_tick(&gb.ppu, &gb.mem, t)
+        ppu_tick(gb, t)
+        timer_tick(gb)
     }
 }
 

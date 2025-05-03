@@ -28,8 +28,9 @@ CPU :: struct {
     prefix: bool,
     enable_interrupts: bool,
     breakpoints: map[u16]Breakpoint_Proc,
-    breakpoint: u16
-
+    breakpoint: u16,
+    skip_breakpoint: bool,
+    break_next: bool // break on the next instruction
 }
 
 Instruction :: struct {
@@ -56,17 +57,6 @@ cpu_init :: proc(cpu: ^CPU) {
 }
 
 cpu_tick :: proc(cpu: ^CPU, mem: ^GB_Memory) {
-    bp, bp_proc := check_breakpoints(cpu)
-
-    if bp {
-        log.debugf("Hit breakpoint at %x", cpu.pc)
-        print_cpu(cpu)
-        bp_proc(cpu, mem)
-        cpu.breakpoint = cpu.pc
-
-        return
-    }
-
     switch cpu.state {
     case CPU_State.Fetch:
         do_fetch_state(cpu, mem)
@@ -88,6 +78,22 @@ cpu_add_breakpoint :: proc(cpu: ^CPU, addr: u16, bp_proc: Breakpoint_Proc) {
     cpu.breakpoints[addr] = bp_proc
 }
 
+// step to the next instruction and break
+cpu_step :: proc(cpu: ^CPU) {
+    if cpu.breakpoint == 0 {
+        panic("cannot step when no breakpoint is active")
+    }
+
+    cpu.breakpoint = 0
+    cpu.break_next = true
+    cpu.skip_breakpoint = true
+}
+
+cpu_continue :: proc(cpu: ^CPU) {
+    cpu.breakpoint = 0
+    cpu.skip_breakpoint = true
+}
+
 check_breakpoints :: proc(cpu: ^CPU) -> (bool, Breakpoint_Proc) {
     bp_proc, exist := cpu.breakpoints[cpu.pc]
 
@@ -98,22 +104,68 @@ check_breakpoints :: proc(cpu: ^CPU) -> (bool, Breakpoint_Proc) {
     return false, nil
 }
 
-do_fetch_state :: proc(cpu: ^CPU, mem: ^GB_Memory) {
-    if check_interrupts(cpu, mem) {
-        return
+process_breakpoints :: proc(cpu: ^CPU, mem: ^GB_Memory) -> bool {
+    if cpu.exec_op == 0xCB { // don't break on PREFIX instruction
+        return false
     }
 
+    if cpu.skip_breakpoint {
+        return false
+    }
+
+    if cpu.break_next {
+        cpu.breakpoint = cpu.pc
+        cpu.break_next = false
+        cpu.skip_breakpoint = true
+
+        instr := get_instruction(cpu, cpu.exec_op)
+
+        log.debugf("Breakpoint: 0x%4x - %s (0x%2x) (FFA6 = %x)", cpu.pc, instr.mnemonic, cpu.exec_op, mem_read(mem, 0xFFA6))
+    }
+
+    bp, bp_proc := check_breakpoints(cpu)
+
+    if bp {
+        bp_proc(cpu, mem)
+
+        cpu.breakpoint = cpu.pc
+        cpu.break_next = false
+
+        instr := get_instruction(cpu, cpu.exec_op)
+
+        log.debugf("Breakpoint: 0x%4x - %s (0x%2x)", cpu.pc, instr.mnemonic, cpu.exec_op)
+        return true
+    }
+
+    return false
+}
+
+get_instruction :: proc(cpu: ^CPU, op: u8) -> Instruction {
+    instructions := cpu.prefix ? cpu.prefixed_instructions[:] : cpu.instructions[:]
+    
+    return instructions[op]
+}
+
+do_fetch_state :: proc(cpu: ^CPU, mem: ^GB_Memory) {
     op := mem_read(mem, cpu.pc)
     op_pc := cpu.pc
-    instructions := cpu.prefix ? cpu.prefixed_instructions[:] : cpu.instructions[:]
-    instruction := instructions[op]
+    instr := get_instruction(cpu, op)
 
     cpu.exec_op = op
+
+    if process_breakpoints(cpu, mem) {
+        return // we hit a breakpoint
+    }
+
+    if process_interrupts(cpu, mem) {
+        return // some interrupt has to be executed
+    }
+
     cpu.pc += 1
     cpu.prefix = false
 
     data: u16 = 0
-    len := instruction.len - 1
+    len := instr.len - 1
 
     if len > 0 {
         data = fetch(cpu, mem, len)
@@ -122,9 +174,11 @@ do_fetch_state :: proc(cpu: ^CPU, mem: ^GB_Memory) {
     }
 
     // print_cpu(cpu)
-    // log.debugf("0x%x - %s (0x%x) 0x%x (SP: %d)", op_pc, instruction.mnemonic, op, data, cpu.sp)
-    instruction.func(cpu, mem, data)
-    cpu.exec_cyles = instruction.cycles - 1
+    if (cpu.pc >= 0x100) {
+        // log.debugf("0x%x - %s (0x%x) 0x%x (SP: %d)", op_pc, instruction.mnemonic, op, data, cpu.sp)
+    }
+    instr.func(cpu, mem, data)
+    cpu.exec_cyles = instr.cycles - 1
     cpu.state = CPU_State.ExecuteInstruction
 }
 
@@ -149,6 +203,7 @@ do_execute_instruction_state :: proc(cpu: ^CPU) {
     }
 
     cpu.state = CPU_State.Fetch
+    cpu.skip_breakpoint = false
 }
 
 do_execute_interrupt_state :: proc(cpu: ^CPU) {
@@ -173,7 +228,7 @@ fetch :: proc(cpu: ^CPU, mem: ^GB_Memory, len: int) -> u16 {
     return data
 }
 
-check_interrupts :: proc(cpu: ^CPU, mem: ^GB_Memory) -> bool {
+process_interrupts :: proc(cpu: ^CPU, mem: ^GB_Memory) -> bool {
     i_e := mem_read(mem, u16(GB_HardRegister.IE))
     i_f := mem_read(mem, u16(GB_HardRegister.IF))
 
@@ -414,7 +469,7 @@ xor_byte :: proc(cpu: ^CPU, byte: ^u8, value: u8) {
     write_flag(cpu, Flags.Z, byte^ == 0)
     write_flag(cpu, Flags.N, false)
     write_flag(cpu, Flags.C, false)
-    write_flag(cpu, Flags.H, true)
+    write_flag(cpu, Flags.H, false)
 }
 
 or_register_high :: proc(cpu: ^CPU, reg: ^u16, value: u8) {
@@ -465,7 +520,9 @@ write_to_ram_n16 :: proc(mem: ^GB_Memory, addr: u16, value: u16) {
 }
 
 write_to_high_ram :: proc(mem: ^GB_Memory, addr: u8, value: u8) {
-    mem_write(mem, 0xFF00 + u16(addr), value)
+    high_addr := 0xFF00 + u16(addr)
+
+    mem_write(mem, high_addr, value)
 }
 
 jr :: proc(cpu: ^CPU, offset: i8) {
@@ -2065,6 +2122,7 @@ DEC_0x25 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
  */
 DAA_0x27 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
     // TODO
+    panic("DAA not implemented")
 }
 
 /*

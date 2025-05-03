@@ -9,7 +9,12 @@ main :: proc() {
     gb := GB{}
 
     gb_init(&gb)
-    // cpu_add_breakpoint(&gb.cpu, 0x55, dump_vram)
+    // cpu_add_breakpoint(&gb.cpu, 0x02c4, dump_vram)
+    // cpu_add_breakpoint(&gb.cpu, 0x02cd, dump_vram)
+    // cpu_add_breakpoint(&gb.cpu, 0x40, dump_vram)
+    // cpu_add_breakpoint(&gb.cpu, 0x17e, dump_vram) // VBlank handler
+    // cpu_add_breakpoint(&gb.cpu, 0x02f8, dump_vram)
+    // cpu_add_breakpoint(&gb.cpu, 0x393, dump_vram)
 
     rom_path := "ROMS/tetris.gb"
 

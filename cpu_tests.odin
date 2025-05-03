@@ -502,6 +502,26 @@ interrupts :: proc(t: ^testing.T) {
     testing.expect_value(t, cpu.pc, 0x60) // Joypad interrupt handler
 }
 
+@(test)
+relative_jumps :: proc(t: ^testing.T) {
+    cpu := CPU{}
+    mem := GB_Memory{}
+
+    mbc_dummy_init(&mem)
+    cpu_init(&cpu)
+
+    cpu.pc = 0xFF00
+
+    jr(&cpu, -10)
+    testing.expect_value(t, cpu.pc, 0xFEF6)
+    jr(&cpu, 127)
+    testing.expect_value(t, cpu.pc, 0xFF75)
+    jr(&cpu, -127)
+    testing.expect_value(t, cpu.pc, 0xFEF6)
+    jr(&cpu, 10)
+    testing.expect_value(t, cpu.pc, 0xFF00)
+}
+
 @(private="file")
 run_cpu :: proc(cpu: ^CPU, mem: ^GB_Memory, ticks: int) {
     for i := 0; i < ticks; i += 1 {
