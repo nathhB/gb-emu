@@ -7,9 +7,6 @@ import "core:mem"
 import rl "vendor:raylib"
 
 DotNs: u64 = 238 // 1 dot = 2^22 Hz, 1 dot = 1 T-Cycle, 1 M-Cycle = 4 T-Cycle
-ScanelineDots :: 456
-FrameScanlines :: 154
-FrameDrawScanlines :: 144
 FrameDots: u64 = ScanelineDots * FrameScanlines
 FrameNs: u64 = FrameDots * DotNs
 ScreenWidth :: 160
@@ -55,7 +52,10 @@ GB_HardRegister :: enum u16 {
     DIV = 0xFF04,
     TIMA = 0xFF05,
     TMA = 0xFF06,
-    TAC = 0xFF07
+    TAC = 0xFF07,
+    WY = 0xFF4A,
+    WX = 0xFF4B,
+    DMA = 0xFF46
 }
 
 gb_init :: proc(gb: ^GB) {
@@ -68,7 +68,8 @@ gb_init :: proc(gb: ^GB) {
 gb_run :: proc(gb: ^GB) {
     screen_texture := rl.LoadRenderTexture(ScreenWidth, ScreenHeight)
     screen_rect := rl.Rectangle{0, 0, ScreenWidth, ScreenHeight}
-    target_rect := rl.Rectangle{0, 0, f32(rl.GetScreenWidth()), f32(rl.GetScreenHeight())}
+
+    screen_texture.texture.format = rl.PixelFormat.UNCOMPRESSED_R8G8B8A8
 
     for !rl.WindowShouldClose() {
         if !gb.booted && mem_read(&gb.mem, 0xFF50) != 0 {
@@ -86,16 +87,18 @@ gb_run :: proc(gb: ^GB) {
 
         rl.BeginDrawing()
         {
+            target_rect := rl.Rectangle{0, 0, f32(rl.GetScreenWidth()), f32(rl.GetScreenHeight())}
+
             rl.ClearBackground(rl.LIGHTGRAY)
 
             rl.DrawTexturePro(screen_texture.texture, screen_rect, target_rect, rl.Vector2{0, 0}, 0, rl.WHITE)
             rl.DrawFPS(0, 0)
-            draw_debugger_info(gb);
+            // draw_debugger_info(gb);
         }
         rl.EndDrawing()
     }
 
-    rl.UnloadTexture(screen_texture.texture)
+    rl.UnloadRenderTexture(screen_texture)
 }
 
 gb_load_rom :: proc(gb: ^GB, path: string) -> GB_Error {

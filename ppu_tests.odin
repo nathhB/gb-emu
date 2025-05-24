@@ -1,6 +1,7 @@
 package gb_emu
 
 import "core:testing"
+import "core:log"
 
 @(test)
 ppu_modes :: proc(t: ^testing.T) {
@@ -10,44 +11,41 @@ ppu_modes :: proc(t: ^testing.T) {
     mbc_dummy_init(&gb.mem)
     ppu_init(&gb.ppu, &gb.mem)
 
-    // test modes for the first 144 scanlines of the frame
+    // test modes over 10 frames
 
-    for i := 0; i < 144; i += 1 {
-        for j := 0; j < 80; j += 1 {
-            ppu_tick(&gb, tick)
-            tick += 1
+    for f := 0; f < 10; f += 1 {
+        tick = 0
 
-            testing.expect_value(t, gb.ppu.mode, PPU_Mode.OAM_Scan)
+        // test modes for the first 144 scanlines of the frame
+        for i := 0; i < 144; i += 1 {
+            for j := 0; j < ScanelineDots; j += 1 {
+                ppu_tick(&gb, tick)
+                tick += 1
+
+                if j < 80 {
+                    testing.expect_value(t, gb.ppu.mode, PPU_Mode.OAM_Scan)
+                } else if j < 80 + 172 {
+                    testing.expect_value(t, gb.ppu.mode, PPU_Mode.DrawPixels)
+                } else {
+                    testing.expect_value(t, gb.ppu.mode, PPU_Mode.HBlank)
+                }
+            }
         }
 
-        for j := 0; j < 172; j += 1 {
-            ppu_tick(&gb, tick)
-            tick += 1
+        testing.expect_value(t, gb.ppu.scanline, 143)
 
-            testing.expect_value(t, gb.ppu.mode, PPU_Mode.DrawPixels)
+        // then for the last 10 scanlines of the frame
+        for i := 0; i < 10; i += 1 {
+            for j := 0; j < 456; j += 1 {
+                ppu_tick(&gb, tick)
+                tick += 1
+
+                testing.expect_value(t, gb.ppu.mode, PPU_Mode.VBlank)
+            }
         }
 
-        for j := 0; j < 204; j += 1 {
-            ppu_tick(&gb, tick)
-            tick += 1
-
-            testing.expect_value(t, gb.ppu.mode, PPU_Mode.HBlank)
-        }
-    }
-
-    testing.expect_value(t, gb.ppu.scanline, 143)
-
-    // then for the last 10 scanlines of the frame
-    for i := 0; i < 10; i += 1 {
-        for j := 0; j < 456; j += 1 {
-            ppu_tick(&gb, tick)
-            tick += 1
-
-            testing.expect_value(t, gb.ppu.mode, PPU_Mode.VBlank)
-        }
-    }
-
-    testing.expect_value(t, gb.ppu.scanline, 153)
+        testing.expect_value(t, gb.ppu.scanline, 153)
+    } 
 }
 
 @(private="file")

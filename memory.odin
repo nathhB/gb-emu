@@ -37,6 +37,9 @@ write_to_hardware_register :: proc(mem: ^GB_Memory, addr: u16, byte: u8) {
         write_to_joypad(mem, byte)
     } else if reg == GB_HardRegister.DIV {
         write_to_div(mem)
+    } else if reg == GB_HardRegister.DMA {
+        // TODO
+        log.debugf("DMA TRANSFER: %x", byte)
     } else {
         mem.write(mem, addr, byte)
     }
