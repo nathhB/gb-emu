@@ -21,7 +21,8 @@ GB :: struct {
     div_acc: u64,
     timer_acc: u64,
     timer_enabled: bool,
-    timer_dots: u64
+    timer_dots: u64,
+    speed: int
 }
 
 GB_Error :: enum u32 {
@@ -63,6 +64,7 @@ gb_init :: proc(gb: ^GB) {
     ppu_init(&gb.ppu, &gb.mem) 
 
     gb.mem.data[GB_HardRegister.JOYPAD] = 0xFF
+    gb.speed = 4 // start at x4 to go through the booting phase quicker
 }
 
 gb_run :: proc(gb: ^GB) {
@@ -75,10 +77,11 @@ gb_run :: proc(gb: ^GB) {
         if !gb.booted && mem_read(&gb.mem, 0xFF50) != 0 {
             unload_boot_rom(gb)
             gb.booted = true
+            gb.speed = 1
         }
 
         if gb.cpu.breakpoint == 0 {
-            do_frame(gb)
+            do_frame(gb) 
         } else {
             process_debugger_inputs(&gb.cpu)
         }
@@ -158,15 +161,18 @@ unload_boot_rom :: proc(gb: ^GB) {
 }
 
 do_frame :: proc(gb: ^GB) {
-    for t: u64 = 0; t < FrameDots; t += 1 {
-        cpu_tick(&gb.cpu, &gb.mem)
+    for f := 0; f < gb.speed; f += 1 {
+        for t: u64 = 0; t < FrameDots; t += 1 {
+            cpu_tick(&gb.cpu, &gb.mem)
 
-        if gb.cpu.breakpoint > 0 {
-            return
+            if gb.cpu.breakpoint > 0 {
+                return
+            }
+
+            mem_tick(&gb.mem)
+            ppu_tick(gb, t)
+            timer_tick(gb)
         }
-
-        ppu_tick(gb, t)
-        timer_tick(gb)
     }
 }
 

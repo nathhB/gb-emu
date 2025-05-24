@@ -163,7 +163,6 @@ get_pixel_color_at :: proc(ppu: ^PPU, mem: ^GB_Memory, x: int, y: int) -> rl.Col
 
     // TODO: background pixel may take priority over the object pixel
     if draw_obj {
-        log.debug("DRAW OBJ")
         obj_tile_addr := get_tile_addr(mem, obj_tile_id, is_object = true)
         pixel_color = get_pixel_color(ppu, mem, obj_tile_addr, x, y)
     }
