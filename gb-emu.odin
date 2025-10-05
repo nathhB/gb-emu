@@ -1,34 +1,41 @@
 package gb_emu
 
-import "core:os"
 import "core:log"
+import "core:os"
 import rl "vendor:raylib"
 
 main :: proc() {
-    context.logger = log.create_console_logger()
-    gb := GB{}
+	context.logger = log.create_console_logger()
+	gb := GB{}
 
-    gb_init(&gb)
-    // cpu_add_breakpoint(&gb.cpu, 0x02c4, dump_vram)
-    // cpu_add_breakpoint(&gb.cpu, 0x02cd, dump_vram)
-    // cpu_add_breakpoint(&gb.cpu, 0x40, dump_vram)
-    // cpu_add_breakpoint(&gb.cpu, 0x17e, dump_vram) // VBlank handler
-    // cpu_add_breakpoint(&gb.cpu, 0x02f8, dump_vram)
-    // cpu_add_breakpoint(&gb.cpu, 0x393, dump_vram)
+	gb_init(&gb)
+	// cpu_add_breakpoint(&gb.cpu, 0x02c4, dump_vram)
+	// cpu_add_breakpoint(&gb.cpu, 0x02cd, dump_vram)
+	// cpu_add_breakpoint(&gb.cpu, 0x40, dump_vram)
+	// cpu_add_breakpoint(&gb.cpu, 0x17e, dump_vram) // VBlank handler
+	// cpu_add_breakpoint(&gb.cpu, 0x02f8, dump_vram)
+	// cpu_add_breakpoint(&gb.cpu, 0x393, dump_vram)
 
-    rom_path := "ROMS/tetris.gb"
+	bp_proc := proc(cpu: ^CPU, mem: ^GB_Memory) {
+		log.debug("HERE")
+		print_cpu(cpu)
+	}
 
-    err := gb_load_rom(&gb, rom_path)
+	// cpu_add_breakpoint(&gb.cpu, 0x04a8, bp_proc)
 
-    if err != GB_Error.None {
-        log.error("Failed to load boot ROM")
+	rom_path := "ROMS/tetris.gb"
 
-        os.exit(1)
-    }
+	err := gb_load_rom(&gb, rom_path)
 
-    rl.SetTargetFPS(60)
-    rl.SetConfigFlags({rl.ConfigFlag.WINDOW_HIGHDPI, rl.ConfigFlag.WINDOW_RESIZABLE})
-    rl.InitWindow(640, 480, "GB Emulator")
+	if err != GB_Error.None {
+		log.error("Failed to load boot ROM")
 
-    gb_run(&gb)
+		os.exit(1)
+	}
+
+	rl.SetTargetFPS(60)
+	rl.SetConfigFlags({rl.ConfigFlag.WINDOW_HIGHDPI, rl.ConfigFlag.WINDOW_RESIZABLE})
+	rl.InitWindow(640, 480, "GB Emulator")
+
+	gb_run(&gb)
 }
