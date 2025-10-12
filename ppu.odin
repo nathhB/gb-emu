@@ -1,6 +1,7 @@
 package gb_emu
 
 import sa "core:container/small_array"
+import "core:fmt"
 import "core:log"
 import "core:time"
 import rl "vendor:raylib"
@@ -174,12 +175,18 @@ get_pixel_color_at :: proc(ppu: ^PPU, mem: ^GB_Memory, x: int, y: int) -> rl.Col
 		pixel_color = get_pixel_color(ppu, mem, bg_tile_addr, tilemap_x, tilemap_y)
 	}
 
-	obj_tile_id, draw_obj := get_object_tile_id(ppu, x)
+	if get_control_flag(mem, PPU_Control.OBJ_Enable) {
+		obj_tile_id, draw_obj := get_object_tile_id(ppu, x)
 
-	// TODO: background pixel may take priority over the object pixel
-	if draw_obj {
-		obj_tile_addr := get_tile_addr(mem, obj_tile_id, is_object = true)
-		pixel_color = get_pixel_color(ppu, mem, obj_tile_addr, x, y)
+		// TODO: background pixel may take priority over the object pixel
+		if draw_obj {
+			fmt.ensuref(
+				get_control_flag(mem, PPU_Control.OBJ_Size) == false,
+				"8x16 objects are not supported",
+			)
+			obj_tile_addr := get_tile_addr(mem, obj_tile_id, is_object = true)
+			pixel_color = get_pixel_color(ppu, mem, obj_tile_addr, x, y)
+		}
 	}
 
 	return pixel_color
@@ -220,8 +227,7 @@ get_object_tile_id :: proc(ppu: ^PPU, x: int) -> (u8, bool) {
 	objects := sa.slice(&ppu.scanline_objects)
 
 	for obj in objects {
-		obj_x := int(obj.x) - 8
-		obj_y := int(obj.y)
+		obj_x := int(obj.x)
 
 		if x >= obj_x && x <= obj_x + 7 {
 			return obj.tile_id, true
@@ -288,7 +294,7 @@ scan_oam :: proc(ppu: ^PPU, mem: ^GB_Memory) {
 			continue
 		}
 
-		x_pos := mem_read(mem, obj_addr + 1)
+		x_pos := mem_read(mem, obj_addr + 1) - 8
 		tile_id := mem_read(mem, obj_addr + 2)
 		attrs := mem_read(mem, obj_addr + 3)
 

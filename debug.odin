@@ -25,7 +25,7 @@ print_cpu :: proc(cpu: ^CPU) {
 	ime := int(cpu.ime)
 
 	log.debugf(
-		"AF: %x, BC: %x, DE: %x, HL: %x, SP: %x, PC: %x | Z: %d, H: %d, N: %d, C: %d | IME: %d",
+		"AF: %4x, BC: %4x, DE: %4x, HL: %4x, SP: %4x, PC: %4x | Z: %d, H: %d, N: %d, C: %d | IME: %d",
 		cpu.af,
 		cpu.bc,
 		cpu.de,

@@ -1,11 +1,13 @@
 package gb_emu
 
 import "core:log"
+import rl "vendor:raylib"
 
 GB_Memory :: struct {
 	data:         [0xFFFF + 1]u8,
 	rom:          []u8,
 	rom_bank:     int,
+	external_ram: bool,
 	read:         proc(mem: ^GB_Memory, addr: u16) -> u8,
 	write:        proc(mem: ^GB_Memory, addr: u16, byte: u8),
 	get_ptr:      proc(mem: ^GB_Memory, addr: u16) -> ^u8,
@@ -27,7 +29,13 @@ mem_write :: proc(mem: ^GB_Memory, addr: u16, byte: u8) {
 }
 
 mem_read :: proc(mem: ^GB_Memory, addr: u16) -> u8 {
-	return mem.read(mem, addr)
+	if addr == 0xFF00 {
+		byte := mem.read(mem, addr)
+
+		return byte
+	} else {
+		return mem.read(mem, addr)
+	}
 }
 
 mem_get_ptr :: proc(mem: ^GB_Memory, addr: u16) -> ^u8 {
@@ -50,17 +58,45 @@ write_to_hardware_register :: proc(mem: ^GB_Memory, addr: u16, byte: u8) {
 		write_to_div(mem)
 	} else if reg == GB_HardRegister.DMA {
 		start_dma_transfer(mem, byte)
+	} else if reg >= GB_HardRegister.NR10 && reg <= GB_HardRegister.NR34 {
+		write_to_audio_registers(mem, reg, byte)
 	} else {
 		mem.write(mem, addr, byte)
 	}
 }
 
 write_to_joypad :: proc(mem: ^GB_Memory, byte: u8) {
-	reg := mem_read(mem, u16(GB_HardRegister.JOYPAD))
+	data := u8(0xCF | byte)
+	select_buttons := (data & (1 << 5)) == 0
+	select_dpad := (data & (1 << 4)) == 0
 
-	reg = (reg & 0x0F) | (0xC0 | (byte & 0xF0))
+	if select_dpad {
+		if rl.IsKeyDown(rl.KeyboardKey.RIGHT) {
+			data &= ~u8(1)
+		} else if rl.IsKeyDown(rl.KeyboardKey.LEFT) {
+			data &= ~(u8(1) << 1)
+		} else if rl.IsKeyDown(rl.KeyboardKey.UP) {
+			data &= ~(u8(1) << 2)
+		} else if rl.IsKeyDown(rl.KeyboardKey.DOWN) {
+			data &= ~(u8(1) << 3)
+		}
+	} else if select_buttons {
+		if rl.IsKeyDown(rl.KeyboardKey.A) {
+			data &= ~u8(1)
+		} else if rl.IsKeyDown(rl.KeyboardKey.B) {
+			data &= ~(u8(1) << 1)
+		} else if rl.IsKeyDown(rl.KeyboardKey.S) {
+			data &= ~(u8(1) << 2)
+		} else if rl.IsKeyDown(rl.KeyboardKey.SPACE) {
+			data &= ~(u8(1) << 3)
+		}
+	}
 
-	mem.write(mem, u16(GB_HardRegister.JOYPAD), reg)
+	mem.write(mem, u16(GB_HardRegister.JOYPAD), data)
+}
+
+write_to_audio_registers :: proc(mem: ^GB_Memory, reg: GB_HardRegister, byte: u8) {
+	// log.debugf("WRITE TO AUDIO: %w: %x", reg, byte)
 }
 
 write_to_div :: proc(mem: ^GB_Memory) {

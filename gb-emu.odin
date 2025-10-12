@@ -9,26 +9,26 @@ main :: proc() {
 	gb := GB{}
 
 	gb_init(&gb)
-	// cpu_add_breakpoint(&gb.cpu, 0x02c4, dump_vram)
-	// cpu_add_breakpoint(&gb.cpu, 0x02cd, dump_vram)
-	// cpu_add_breakpoint(&gb.cpu, 0x40, dump_vram)
-	// cpu_add_breakpoint(&gb.cpu, 0x17e, dump_vram) // VBlank handler
-	// cpu_add_breakpoint(&gb.cpu, 0x02f8, dump_vram)
-	// cpu_add_breakpoint(&gb.cpu, 0x393, dump_vram)
 
-	bp_proc := proc(cpu: ^CPU, mem: ^GB_Memory) {
-		log.debug("HERE")
-		print_cpu(cpu)
-	}
+	// test failed = 0xc1b9
 
-	// cpu_add_breakpoint(&gb.cpu, 0x04a8, bp_proc)
+	// cpu_add_breakpoint(&gb.cpu, 0xc1b9, proc(cpu: ^CPU, mem: ^GB_Memory) {
+	// 	print_cpu(cpu)
+	// })
 
-	rom_path := "ROMS/tetris.gb"
+	// cpu_add_breakpoint(&gb.cpu, 0xc325, proc(cpu: ^CPU, mem: ^GB_Memory) {
+	// 	print_cpu(cpu)
+	// 	log.debugf("Show stack: %x %x", mem.data[cpu.sp], mem.data[cpu.sp + 1])
+	// })
+
+	rom_path := "ROMS/cpu_instrs.gb"
 
 	err := gb_load_rom(&gb, rom_path)
 
+	// dump_memory(&gb.cpu, &gb.mem, 0x4000, 0x7FFF)
+
 	if err != GB_Error.None {
-		log.error("Failed to load boot ROM")
+		log.errorf("Failed to load boot ROM: %w", err)
 
 		os.exit(1)
 	}

@@ -35,8 +35,8 @@ GB_Error :: enum u32 {
 }
 
 ROM_Header :: struct {
-	rom_size: int,
 	rom_type: u8,
+	rom_size: int,
 	ram_size: int,
 }
 
@@ -57,6 +57,25 @@ GB_HardRegister :: enum u16 {
 	WY     = 0xFF4A,
 	WX     = 0xFF4B,
 	DMA    = 0xFF46,
+
+	// Audio registers
+	NR10   = 0xFF10, // Channel 1 sweep
+	NR11   = 0xFF11, // Channel 1 length timer & duty cycle
+	NR12   = 0xFF12, // Channel 1 volume & enveloppe
+	NR13   = 0xFF13, // Channel 1 period low
+	NR14   = 0xFF14, // Channel 1 period high & control
+	NR21   = 0xFF16, // Channel 2 length timer & duty cycle
+	NR22   = 0xFF17, // Channel 2 volume & enveloppe
+	NR23   = 0xFF18, // Channel 2 period low
+	NR24   = 0xFF19, // Channel 2 period high & control
+	NR30   = 0xFF1A, // Channel 3 DAC enable
+	NR31   = 0xFF1B, // Channel 3 length timer [write-only]
+	NR32   = 0xFF1C, // Channel 3 output level
+	NR33   = 0xFF1D, // Channel 3 period low [write-only]
+	NR34   = 0xFF1E, // Channel 3 period high & control
+	NR50   = 0xFF24, // Master volume & VIN panning
+	NR51   = 0xFF25, // Sound panning
+	NR52   = 0xFF26, // Audio master control
 }
 
 gb_init :: proc(gb: ^GB) {
@@ -128,13 +147,19 @@ gb_load_rom :: proc(gb: ^GB, path: string) -> GB_Error {
 		return GB_Error.ROM_FailedToLoadBoot
 	}
 
+	print_rom_info(header)
+
 	switch header.rom_type {
 	case 0:
 		mbc0_init(&gb.mem, rom)
 		copy(gb.mem.data[0x100:], rom[0x100:0x8000]) // map the full rom to 0 - 0x7FFF
 		log.info("No memory controller")
-	case 1:
-		mbc1_init(&gb.mem, rom)
+	case 0x1:
+		mbc1_init(&gb.mem, rom, header.ram_size)
+		copy(gb.mem.data[0x100:], rom[0x100:0x4000]) // load the first 16kb bank 
+		log.info("Using MBC1 memory controller")
+	case 0x3:
+		mbc1_init(&gb.mem, rom, header.ram_size)
 		copy(gb.mem.data[0x100:], rom[0x100:0x4000]) // load the first 16kb bank 
 		log.info("Using MBC1 memory controller")
 	case:
@@ -142,7 +167,6 @@ gb_load_rom :: proc(gb: ^GB, path: string) -> GB_Error {
 	}
 
 	log.infof("Successfully loaded ROM %s (size: %d)", path, len(rom))
-	print_rom_info(header)
 
 	return GB_Error.None
 }
@@ -199,11 +223,11 @@ read_rom_header :: proc(rom: []u8) -> ROM_Header {
 		ram_size = 32 * 1024
 	}
 
-	return (ROM_Header){rom_size, rom_type, ram_size}
+	return (ROM_Header){rom_type, rom_size, ram_size}
 }
 
 print_rom_info :: proc(header: ROM_Header) {
-	log.infof("ROM Type: %d", header.rom_type)
+	log.infof("ROM Type: 0x%x", header.rom_type)
 	log.infof("ROM Size (Kb): %d", header.rom_size)
 	log.infof("RAM Size (Kb): %d", header.ram_size)
 }

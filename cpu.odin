@@ -22,6 +22,7 @@ CPU_State :: enum {
 	Fetch,
 	ExecuteInstruction,
 	ExecuteInterrupt,
+	Halted,
 }
 
 Breakpoint_Proc :: #type proc(cpu: ^CPU, mem: ^GB_Memory)
@@ -79,6 +80,8 @@ cpu_tick :: proc(cpu: ^CPU, mem: ^GB_Memory) {
 		do_execute_instruction_state(cpu)
 	case CPU_State.ExecuteInterrupt:
 		do_execute_interrupt_state(cpu)
+	case CPU_State.Halted:
+		do_halted_state(cpu, mem)
 	}
 }
 
@@ -142,19 +145,21 @@ process_breakpoints :: proc(cpu: ^CPU, mem: ^GB_Memory) -> bool {
 			cpu.exec_op,
 			mem_read(mem, 0xFFA6),
 		)
+		print_cpu(cpu)
 	}
 
 	bp, bp_proc := check_breakpoints(cpu)
 
 	if bp {
+		instr := get_instruction(cpu, cpu.exec_op)
+
+		log.debugf("Breakpoint: 0x%4x - %s (0x%2x)", cpu.pc, instr.mnemonic, cpu.exec_op)
+
 		bp_proc(cpu, mem)
 
 		cpu.breakpoint = cpu.pc
 		cpu.break_next = false
 
-		instr := get_instruction(cpu, cpu.exec_op)
-
-		log.debugf("Breakpoint: 0x%4x - %s (0x%2x)", cpu.pc, instr.mnemonic, cpu.exec_op)
 		return true
 	}
 
@@ -194,9 +199,9 @@ do_fetch_state :: proc(cpu: ^CPU, mem: ^GB_Memory) {
 		cpu.pc += u16(len)
 	}
 
-	// print_cpu(cpu)
 	if (cpu.pc >= 0x100) {
 		// log.debugf("0x%x - %s (0x%x) 0x%x (SP: %d)", op_pc, instr.mnemonic, op, data, cpu.sp)
+		// print_cpu(cpu)
 	}
 	instr.func(cpu, mem, data)
 	cpu.exec_cyles = instr.cycles - 1
@@ -237,6 +242,25 @@ do_execute_interrupt_state :: proc(cpu: ^CPU) {
 	cpu.state = CPU_State.Fetch
 }
 
+// https://gbdev.io/pandocs/halt.html?highlight=HALT#halt
+do_halted_state :: proc(cpu: ^CPU, mem: ^GB_Memory) {
+	if cpu.ime {
+		// IME is enabled, stay in halted state until an interrupt happens
+
+		if process_interrupts(cpu, mem) {
+			cpu.state = CPU_State.Fetch
+		}
+	} else {
+		// IME is not enabled, exit halt state as soon as an interrupt
+		// happens, but don't process it
+		i_f := mem_read(mem, u16(GB_HardRegister.IF))
+
+		if i_f > 0 {
+			cpu.state = CPU_State.Fetch
+		}
+	}
+}
+
 fetch :: proc(cpu: ^CPU, mem: ^GB_Memory, len: int) -> u16 {
 	assert(len == 1 || len == 2)
 
@@ -250,9 +274,6 @@ fetch :: proc(cpu: ^CPU, mem: ^GB_Memory, len: int) -> u16 {
 }
 
 process_interrupts :: proc(cpu: ^CPU, mem: ^GB_Memory) -> bool {
-	i_e := mem_read(mem, u16(GB_HardRegister.IE))
-	i_f := mem_read(mem, u16(GB_HardRegister.IF))
-
 	if (!cpu.ime) {
 		return false
 	}
@@ -398,16 +419,11 @@ add_to_register_low :: proc(cpu: ^CPU, reg: ^u16, value: u8, add_carry: bool = f
 }
 
 add_to_byte :: proc(cpu: ^CPU, byte: ^u8, value: u8, add_carry: bool = false) {
-	add := int(value)
+	add_carry := add_carry && read_flag(cpu, Flags.C)
+	c := int(byte^) + int(value) + int(add_carry) > 0xFF
+	hc := int(byte^ & 0xF) + int(value & 0xF) + int(add_carry) > 0xF
 
-	if add_carry && read_flag(cpu, Flags.C) {
-		add += 1
-	}
-
-	c := int(byte^) + add > 0xFF
-	hc := ((int(byte^ & 0xF) + (add & 0xF)) & 0x10) == 0x10
-
-	byte^ += u8(add)
+	byte^ = byte^ + value + u8(add_carry)
 
 	write_flag(cpu, Flags.Z, byte^ == 0)
 	write_flag(cpu, Flags.N, false)
@@ -430,16 +446,11 @@ sub_from_register_low :: proc(cpu: ^CPU, reg: ^u16, value: u8, sub_carry: bool =
 }
 
 sub_from_byte :: proc(cpu: ^CPU, byte: ^u8, value: u8, sub_carry: bool = false) {
-	sub := int(value)
+	sub_carry := sub_carry && read_flag(cpu, Flags.C)
+	c := int(byte^) - int(value) - int(sub_carry) < 0
+	hc := int(byte^ & 0xF) - int(value & 0xF) - int(sub_carry) < 0
 
-	if sub_carry && read_flag(cpu, Flags.C) {
-		sub += 1
-	}
-
-	c := int(byte^) - sub < 0
-	hc := int(byte^ & 0xF) - int(sub & 0xF) < 0
-
-	byte^ -= u8(sub)
+	byte^ = byte^ - value - u8(sub_carry)
 
 	write_flag(cpu, Flags.Z, byte^ == 0)
 	write_flag(cpu, Flags.N, true)
@@ -854,7 +865,17 @@ STOP_0x10 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
    Flags: - - - -
  */
 HALT_0x76 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
-	// TODO
+	// https://gbdev.io/pandocs/halt.html#halt
+	// if IME is disabled and an interrupt is pending, HALT exists immediately
+	if !cpu.ime {
+		i_f := mem_read(mem, u16(GB_HardRegister.IF))
+
+		if i_f > 0 {
+			return
+		}
+	}
+
+	cpu.state = CPU_State.Halted
 }
 
 /*
@@ -1007,6 +1028,8 @@ PUSH_0xe5 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
  */
 POP_0xf1 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
 	pop_register(cpu, mem, &cpu.af)
+
+	cpu.af &= 0xFFF0 // clear the lower 4 bits of F
 }
 
 /*
@@ -1026,15 +1049,25 @@ PUSH_0xf5 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
    Flags: 0 0 H C
  */
 LD_0xf8 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
-	c := int(cpu.sp) + int(data) > 0xFFFF
-	hc := (((cpu.sp & 0xFFF) + (data & 0xFFF)) & 0x1000) == 0x1000
+	s8 := i8(data)
+	c := false
+	hc := false
+	res := u16(int(cpu.sp) + int(s8))
 
-	cpu.hl = cpu.sp + data
+	if s8 >= 0 {
+		c = int(cpu.sp & 0xFF) + int(s8) > 0xFF
+		hc = int(cpu.sp & 0xF) + int(s8 & 0xF) > 0xF
+	} else {
+		c = int(res & 0xFF) <= int(cpu.sp & 0xFF)
+		hc = int(res & 0xF) <= int(cpu.sp & 0xF)
+	}
+
+	cpu.hl = res
 
 	write_flag(cpu, Flags.Z, false)
 	write_flag(cpu, Flags.N, false)
-	write_flag(cpu, Flags.H, hc)
 	write_flag(cpu, Flags.C, c)
+	write_flag(cpu, Flags.H, hc)
 }
 
 /*
@@ -1157,7 +1190,8 @@ LD_0x26 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
    Flags: - - - -
  */
 LD_0x2a :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
-	write_register_high(&cpu.af, mem_read(mem, cpu.hl))
+	byte := mem_read(mem, cpu.hl)
+	write_register_high(&cpu.af, byte)
 	cpu.hl += 1
 }
 
@@ -2034,6 +2068,25 @@ DEC_0x3b :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
    Flags: 0 0 H C
  */
 ADD_0xe8 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
+	s8 := i8(data)
+	c := false
+	hc := false
+	res := u16(int(cpu.sp) + int(s8))
+
+	if s8 >= 0 {
+		c = int(cpu.sp & 0xFF) + int(s8) > 0xFF
+		hc = int(cpu.sp & 0xF) + int(s8 & 0xF) > 0xF
+	} else {
+		c = int(res & 0xFF) <= int(cpu.sp & 0xFF)
+		hc = int(res & 0xF) <= int(cpu.sp & 0xF)
+	}
+
+	cpu.sp = res
+
+	write_flag(cpu, Flags.Z, false)
+	write_flag(cpu, Flags.N, false)
+	write_flag(cpu, Flags.C, c)
+	write_flag(cpu, Flags.H, hc)
 }
 
 // GROUP: x8/alu
@@ -2145,8 +2198,32 @@ DEC_0x25 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
    Flags: Z - 0 C
  */
 DAA_0x27 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
-	// TODO
-	panic("DAA not implemented")
+	offset: u8 = 0
+	a := read_register_high(cpu.af)
+	half_carry := read_flag(cpu, Flags.H)
+	carry := read_flag(cpu, Flags.C)
+	subtract := read_flag(cpu, Flags.N)
+	add_carry := false
+
+	if !subtract && ((a & 0x0F) > 0x09) || half_carry {
+		offset |= 0x06
+	}
+
+	if !subtract && a > 0x99 || carry {
+		offset |= 0x60
+		add_carry = true
+	}
+
+	if subtract {
+		a -= offset
+	} else {
+		a += offset
+	}
+
+	write_register_high(&cpu.af, a)
+	write_flag(cpu, Flags.Z, a == 0)
+	write_flag(cpu, Flags.C, add_carry)
+	write_flag(cpu, Flags.H, false)
 }
 
 /*
