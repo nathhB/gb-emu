@@ -58,6 +58,7 @@ PPU_Control :: enum {
 PPU_Object :: struct {
 	x:       int,
 	y:       int,
+	height:  int,
 	tile_id: u8,
 	attrs:   u8,
 }
@@ -172,8 +173,6 @@ draw_pixels_on_update :: proc(gb: ^GB, tick: u64) {
 }
 
 get_pixel_color_at :: proc(ppu: ^PPU, mem: ^GB_Memory, x: int, y: int) -> rl.Color {
-	// fmt.ensuref(!get_control_flag(mem, PPU_Control.OBJ_Size), "8x16 objects are not supported")
-
 	scx := int(mem.read(mem, u16(GB_HardRegister.SCX)))
 	scy := int(mem.read(mem, u16(GB_HardRegister.SCY)))
 	tilemap_x := (scx + x) % 256
@@ -301,7 +300,7 @@ get_pixel_color :: proc(
 	}
 
 	if y_flip {
-		// TODO: 8x16 objects
+		// TODO: 8x16 objects?
 		y_in_tile = 7 - y_in_tile
 	}
 
@@ -331,9 +330,24 @@ get_object_pixel_color :: proc(
 	pixel_color = 0
 
 	for &obj in objects {
-		tile_id := obj.tile_id
 		x_in_tile := x - obj.x
-		y_in_tile := y - obj.y
+		y_in_obj := y - obj.y
+		y_in_tile: int
+		tile_id: u8
+
+		if obj.height == 16 {
+			if y_in_obj < 8 {
+				tile_id = obj.tile_id & 0xFE
+				y_in_tile = y_in_obj
+			} else {
+				tile_id = obj.tile_id | 0x01
+				y_in_tile = y_in_obj - 8
+			}
+		} else {
+			tile_id = obj.tile_id
+			y_in_tile = y_in_obj
+		}
+
 		obj_tile_addr := get_tile_addr(mem, tile_id, is_object = true)
 		x_flip := get_object_attr(obj, PPU_Object_Attr.X_Flip)
 		y_flip := get_object_attr(obj, PPU_Object_Attr.Y_Flip)
@@ -388,8 +402,6 @@ get_tile_addr :: proc(mem: ^GB_Memory, tile_id: u8, is_object: bool) -> u16 {
 	}
 }
 
-// TODO: add support for 8x16 objects
-
 // https://gbdev.io/pandocs/OAM.html
 scan_oam :: proc(ppu: ^PPU, mem: ^GB_Memory) {
 	oam_addr: u16 = 0xFE00
@@ -401,14 +413,14 @@ scan_oam :: proc(ppu: ^PPU, mem: ^GB_Memory) {
 	    i += 1 {
 		obj_addr := oam_addr + (i * 4)
 		y_pos := int(mem_read(mem, obj_addr)) - 16
+		obj_height := get_control_flag(mem, PPU_Control.OBJ_Size) ? 16 : 8
 
-		// TODO: does not work for 8x16 objects?
-		if int(ppu.scanline) >= y_pos && int(ppu.scanline) <= y_pos + 7 {
+		if int(ppu.scanline) >= y_pos && int(ppu.scanline) < y_pos + obj_height {
 			x_pos := int(mem_read(mem, obj_addr + 1)) - 8
 			tile_id := mem_read(mem, obj_addr + 2)
 			attrs := mem_read(mem, obj_addr + 3)
 
-			sa.append(&ppu.scanline_objects, PPU_Object{x_pos, y_pos, tile_id, attrs})
+			sa.append(&ppu.scanline_objects, PPU_Object{x_pos, y_pos, obj_height, tile_id, attrs})
 		}
 	}
 }
