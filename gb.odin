@@ -25,6 +25,11 @@ GB :: struct {
 	speed:         int,
 }
 
+GB_Debug_Context :: struct {
+	tileset_texture:      rl.RenderTexture2D,
+	show_tileset_texture: bool,
+}
+
 GB_Error :: enum u32 {
 	None,
 	ROM_FileError,
@@ -88,7 +93,11 @@ gb_init :: proc(gb: ^GB) {
 
 gb_run :: proc(gb: ^GB) {
 	screen_texture := rl.LoadRenderTexture(ScreenWidth, ScreenHeight)
+	defer rl.UnloadRenderTexture(screen_texture)
 	screen_rect := rl.Rectangle{0, 0, ScreenWidth, ScreenHeight}
+	debug_ctx := GB_Debug_Context{}
+	debug_ctx.tileset_texture = create_debug_tileset_texture()
+	defer rl.UnloadRenderTexture(debug_ctx.tileset_texture)
 
 	screen_texture.texture.format = rl.PixelFormat.UNCOMPRESSED_R8G8B8A8
 
@@ -101,6 +110,7 @@ gb_run :: proc(gb: ^GB) {
 
 		if gb.cpu.breakpoint == 0 {
 			do_frame(gb)
+			process_debug_inputs(&gb.cpu, &gb.mem, &gb.ppu, &debug_ctx)
 		} else {
 			process_debugger_inputs(&gb.cpu)
 		}
@@ -109,25 +119,55 @@ gb_run :: proc(gb: ^GB) {
 
 		rl.BeginDrawing()
 		{
-			target_rect := rl.Rectangle{0, 0, f32(rl.GetScreenWidth()), f32(rl.GetScreenHeight())}
-
 			rl.ClearBackground(rl.LIGHTGRAY)
 
-			rl.DrawTexturePro(
-				screen_texture.texture,
-				screen_rect,
-				target_rect,
-				rl.Vector2{0, 0},
-				0,
-				rl.WHITE,
-			)
+			if debug_ctx.show_tileset_texture {
+				tileset_texture := debug_ctx.tileset_texture.texture
+				aspect_ratio := f32(tileset_texture.width) / f32(tileset_texture.height)
+				target_rect := rl.Rectangle {
+					0,
+					0,
+					f32(rl.GetScreenHeight()) * aspect_ratio,
+					f32(rl.GetScreenHeight()),
+				}
+				src_rect := rl.Rectangle {
+					0,
+					0,
+					f32(tileset_texture.width),
+					f32(tileset_texture.height),
+				}
+
+				rl.DrawTexturePro(
+					tileset_texture,
+					src_rect,
+					target_rect,
+					rl.Vector2{0, 0},
+					0,
+					rl.WHITE,
+				)
+			} else {
+				target_rect := rl.Rectangle {
+					0,
+					0,
+					f32(rl.GetScreenWidth()),
+					f32(rl.GetScreenHeight()),
+				}
+
+				rl.DrawTexturePro(
+					screen_texture.texture,
+					screen_rect,
+					target_rect,
+					rl.Vector2{0, 0},
+					0,
+					rl.WHITE,
+				)
+			}
+
 			rl.DrawFPS(0, 0)
 			// draw_debugger_info(gb);
 		}
 		rl.EndDrawing()
 	}
-
-	rl.UnloadRenderTexture(screen_texture)
 }
 
 gb_load_rom :: proc(gb: ^GB, path: string) -> GB_Error {

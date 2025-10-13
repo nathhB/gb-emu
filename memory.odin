@@ -7,6 +7,7 @@ GB_Memory :: struct {
 	data:         [0xFFFF + 1]u8,
 	rom:          []u8,
 	rom_bank:     int,
+	ram_bank:     int,
 	external_ram: bool,
 	read:         proc(mem: ^GB_Memory, addr: u16) -> u8,
 	write:        proc(mem: ^GB_Memory, addr: u16, byte: u8),
@@ -101,11 +102,6 @@ write_to_audio_registers :: proc(mem: ^GB_Memory, reg: GB_HardRegister, byte: u8
 
 write_to_div :: proc(mem: ^GB_Memory) {
 	mem.write(mem, u16(GB_HardRegister.DIV), 0)
-}
-
-write_to_tac :: proc(mem: ^GB_Memory, byte: u8) {
-	clock_type := byte & 3
-	clock_enabled := (byte & 4) > 0
 }
 
 // https://gbdev.io/pandocs/OAM_DMA_Transfer.html#ff46--dma-oam-dma-source-address--start

@@ -21,7 +21,7 @@ main :: proc() {
 	// 	log.debugf("Show stack: %x %x", mem.data[cpu.sp], mem.data[cpu.sp + 1])
 	// })
 
-	rom_path := "ROMS/cpu_instrs.gb"
+	rom_path := "ROMS/zelda.gb"
 
 	err := gb_load_rom(&gb, rom_path)
 

@@ -5,6 +5,9 @@ import "core:log"
 import "core:strings"
 import rl "vendor:raylib"
 
+Tile_Count :: 384
+Tiles_Per_Row :: 16
+
 print_vram :: proc(vram: []u8) {
 	for i := 0; i < 384; i += 1 {
 		tile_addr := 0x8000 + (i * 16)
@@ -108,6 +111,20 @@ draw_debugger_info :: proc(gb: ^GB) {
 	}
 }
 
+process_debug_inputs :: proc(cpu: ^CPU, mem: ^GB_Memory, ppu: ^PPU, debug_ctx: ^GB_Debug_Context) {
+	if rl.IsKeyPressed(rl.KeyboardKey.D) {
+		dump_memory(cpu, mem, 0x8000, 0x8800)
+	}
+
+	if rl.IsKeyPressed(rl.KeyboardKey.T) {
+		debug_ctx.show_tileset_texture = !debug_ctx.show_tileset_texture
+
+		if debug_ctx.show_tileset_texture {
+			update_tileset_texture(ppu, mem, debug_ctx.tileset_texture.texture)
+		}
+	}
+}
+
 process_debugger_inputs :: proc(cpu: ^CPU) {
 	if rl.IsKeyPressed(rl.KeyboardKey.S) {
 		cpu_step(cpu)
@@ -146,4 +163,42 @@ flag_to_string :: proc(flag: Flags) -> string {
 	}
 
 	unreachable()
+}
+
+update_tileset_texture :: proc(
+	ppu: ^PPU,
+	mem: ^GB_Memory,
+	texture: rl.Texture2D,
+	addr: u16 = 0x8000,
+) {
+	img_data := make([]rl.Color, texture.width * texture.height)
+	defer delete(img_data)
+
+	for i := 0; i < Tile_Count; i += 1 {
+		x := (i % Tiles_Per_Row) * 8
+		y := (i / Tiles_Per_Row) * 8
+		tile_addr := addr + u16(i * 16)
+
+		for tile_x := 0; tile_x < 8; tile_x += 1 {
+			for tile_y := 0; tile_y < 8; tile_y += 1 {
+				pixel_color_id := get_pixel_color(ppu, mem, tile_addr, tile_x, tile_y)
+				pixel_color := get_color_from_palette(ppu, mem, BGP_Addr, pixel_color_id)
+				img_x := x + tile_x
+				img_y := y + tile_y
+
+				img_data[img_y * int(texture.width) + img_x] = pixel_color
+			}
+		}
+	}
+
+	rl.UpdateTexture(texture, raw_data(img_data[:]))
+}
+
+create_debug_tileset_texture :: proc() -> rl.RenderTexture2D {
+	width :: Tiles_Per_Row * 8
+	height :: (Tile_Count / Tiles_Per_Row) * 8
+	texture := rl.LoadRenderTexture(width, height)
+	texture.texture.format = rl.PixelFormat.UNCOMPRESSED_R8G8B8A8
+
+	return texture
 }

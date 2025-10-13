@@ -13,6 +13,7 @@ mbc1_init :: proc(mem: ^GB_Memory, rom: []u8, ram_size: int) {
 	mem.external_ram = ram_size > 0
 
 	select_rom_bank(mem, 1)
+	select_ram_bank(mem, 0)
 }
 
 mbc1_write :: proc(mem: ^GB_Memory, addr: u16, byte: u8) {
@@ -28,15 +29,24 @@ mbc1_write :: proc(mem: ^GB_Memory, addr: u16, byte: u8) {
 	}
 
 	if addr <= 0x1FFF {
-		// log.debugf("Writing to RAM enable register: 0x%x", byte)
-		mem.external_ram = byte == 0xA
+		enabled := byte == 0xA
+
+		if !mem.external_ram && enabled {
+			log.debug("Enabled RAM")
+		}
+
+		if mem.external_ram && !enabled {
+			log.debug("Disabed RAM")
+		}
+
+		mem.external_ram = enabled
 	} else if addr >= 0x2000 && addr <= 0x3FFF {
 		// writing to ROM bank number register
 		select_rom_bank(mem, byte)
-		log.debugf("selected rom bank: %d (%x)", mem.rom_bank, addr)
 	} else if addr >= 0x4000 && addr <= 0x5FFF {
-		// TODO: ram bank
+		select_ram_bank(mem, byte)
 	} else if addr >= 0x6000 && addr <= 0x7FFF {
+		panic("Selecting banking mode unsupported")
 		// TODO: check rom and ram size
 		// banking_mode := byte & 0x1
 		//
@@ -53,6 +63,16 @@ select_rom_bank :: proc(mem: ^GB_Memory, byte: u8) {
 	bank_end := bank_start + 0x4000
 
 	copy(mem.data[0x4000:], mem.rom[bank_start:bank_end])
+	// log.debugf("Selected ROM bank: %d", mem.rom_bank)
+}
+
+select_ram_bank :: proc(mem: ^GB_Memory, byte: u8) {
+	mem.ram_bank = int(byte & 0x3)
+	bank_start := 0xA000 + u32(mem.ram_bank * 0x2000)
+	bank_end := bank_start + 0x2000
+
+	copy(mem.data[0xA000:], mem.rom[bank_start:bank_end])
+	// log.debugf("Selected RAM bank: %d", mem.ram_bank)
 }
 
 mbc1_read :: proc(mem: ^GB_Memory, addr: u16) -> u8 {
@@ -60,9 +80,9 @@ mbc1_read :: proc(mem: ^GB_Memory, addr: u16) -> u8 {
 		// read from ROM bank
 		return mem.data[addr]
 	} else if addr >= 0xA000 && addr <= 0xBFFF {
+		// read from external RAM if enabled
 		if mem.external_ram {
-			// TODO: implement RAM banking
-			panic("unsupported")
+			return mem.data[addr]
 		} else {
 			return 0xFF
 		}
