@@ -59,6 +59,8 @@ write_to_hardware_register :: proc(mem: ^GB_Memory, addr: u16, byte: u8) {
 		write_to_div(mem)
 	} else if reg == GB_HardRegister.DMA {
 		start_dma_transfer(mem, byte)
+	} else if reg == GB_HardRegister.STAT {
+		mem.write(mem, addr, byte & 0x78)
 	} else if reg >= GB_HardRegister.NR10 && reg <= GB_HardRegister.NR34 {
 		write_to_audio_registers(mem, reg, byte)
 	} else {

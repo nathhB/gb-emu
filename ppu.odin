@@ -26,13 +26,14 @@ PPU :: struct {
 	framebuffer:      [ScreenWidth * ScreenHeight]rl.Color,
 	scanline_objects: sa.Small_Array(MaxObjectsPerScanline, PPU_Object),
 	states:           [4]PPU_State,
+	interrupt_line:   bool,
 }
 
 PPU_Mode :: enum {
-	HBlank,
-	VBlank,
-	OAM_Scan,
-	DrawPixels,
+	HBlank     = 0,
+	VBlank     = 1,
+	OAM_Scan   = 2,
+	DrawPixels = 3,
 }
 
 PPU_State :: struct {
@@ -53,6 +54,14 @@ PPU_Control :: enum {
 	Window_Enable       = 5,
 	Window_TileMap      = 6,
 	PPU_Enable          = 7,
+}
+
+PPU_Status :: enum {
+	LYC_EQ_LY           = 2,
+	HBLANK_INT_SELECT   = 3,
+	VBLANK_INT_SELECT   = 4,
+	OAM_SCAN_INT_SELECT = 5,
+	LYC_INT_SELECT      = 6,
 }
 
 PPU_Object :: struct {
@@ -106,9 +115,13 @@ ppu_init :: proc(ppu: ^PPU, mem: ^GB_Memory) {
 
 ppu_tick :: proc(gb: ^GB, tick: u64) {
 	ppu := &gb.ppu
-
+	stat := mem_read(&gb.mem, u16(GB_HardRegister.STAT))
+	lyc := mem_read(&gb.mem, u16(GB_HardRegister.LYC))
 	ppu.scanline = u8(tick / ScanelineDots)
-	mem_write(&gb.mem, u16(GB_HardRegister.LY), u8(ppu.scanline))
+
+	mem_write(&gb.mem, u16(GB_HardRegister.LY), ppu.scanline)
+	handle_lcd_interrupts(gb, stat, lyc)
+	update_lcd_status(gb, stat, lyc)
 
 	current_state := &ppu.states[ppu.mode]
 
@@ -142,6 +155,41 @@ change_mode :: proc(ppu: ^PPU) {
 	} else {
 		ppu.mode = current_state.next_mode
 	}
+}
+
+handle_lcd_interrupts :: proc(gb: ^GB, stat: u8, lyc: u8) {
+	interrupt_line :=
+		(gb.ppu.mode == PPU_Mode.HBlank &&
+			check_lcd_interrupt_enabled(stat, PPU_Status.HBLANK_INT_SELECT)) ||
+		(gb.ppu.mode == PPU_Mode.VBlank &&
+				check_lcd_interrupt_enabled(stat, PPU_Status.VBLANK_INT_SELECT)) ||
+		(gb.ppu.mode == PPU_Mode.OAM_Scan &&
+				check_lcd_interrupt_enabled(stat, PPU_Status.OAM_SCAN_INT_SELECT)) ||
+		(lyc == gb.ppu.scanline && check_lcd_interrupt_enabled(stat, PPU_Status.LYC_INT_SELECT))
+
+
+	if !gb.ppu.interrupt_line && interrupt_line {
+		cpu_request_interrupt(&gb.cpu, &gb.mem, Interrupt.LCD)
+	}
+
+	gb.ppu.interrupt_line = interrupt_line
+}
+
+update_lcd_status :: proc(gb: ^GB, stat: u8, lyc: u8) {
+	stat := (stat & 0xFC) | (u8(gb.ppu.mode) & 0x03)
+
+	if gb.ppu.scanline == lyc {
+		stat |= (1 << u8(PPU_Status.LYC_EQ_LY))
+	} else {
+		stat &= ~u8(1 << u8(PPU_Status.LYC_EQ_LY))
+	}
+
+	// don't use mem_write intentionally
+	gb.mem.write(&gb.mem, u16(GB_HardRegister.STAT), stat)
+}
+
+check_lcd_interrupt_enabled :: proc(stat: u8, interrupt: PPU_Status) -> bool {
+	return (stat & (1 << u8(interrupt))) > 0
 }
 
 oam_scan_on_enter :: proc(gb: ^GB) {

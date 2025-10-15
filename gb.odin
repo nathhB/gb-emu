@@ -268,6 +268,6 @@ read_rom_header :: proc(rom: []u8) -> ROM_Header {
 
 print_rom_info :: proc(header: ROM_Header) {
 	log.infof("ROM Type: 0x%x", header.rom_type)
-	log.infof("ROM Size (Kb): %d", header.rom_size)
+	log.infof("ROM Size (Kb): %d", header.rom_size / 1024)
 	log.infof("RAM Size (Kb): %d", header.ram_size)
 }

@@ -46,7 +46,7 @@ mbc1_write :: proc(mem: ^GB_Memory, addr: u16, byte: u8) {
 	} else if addr >= 0x4000 && addr <= 0x5FFF {
 		select_ram_bank(mem, byte)
 	} else if addr >= 0x6000 && addr <= 0x7FFF {
-		panic("Selecting banking mode unsupported")
+		fmt.panicf("Selecting banking mode unsupported: %x (addr: %x)", byte, addr)
 		// TODO: check rom and ram size
 		// banking_mode := byte & 0x1
 		//

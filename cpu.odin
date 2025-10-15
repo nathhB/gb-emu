@@ -11,11 +11,11 @@ Flags :: enum {
 
 // enum order matters: from highest to lowest priority
 Interrupt :: enum {
-	VBlank,
-	LCD,
-	Timer,
-	Serial,
-	Joypad,
+	VBlank = 0,
+	LCD    = 1,
+	Timer  = 2,
+	Serial = 3,
+	Joypad = 4,
 }
 
 CPU_State :: enum {
@@ -41,7 +41,6 @@ CPU :: struct {
 	state:                 CPU_State,
 	exec_op:               u8,
 	exec_cyles:            int,
-	prefix:                bool,
 	enable_interrupts:     bool,
 	breakpoints:           map[u16]Breakpoint_Proc,
 	breakpoint:            u16,
@@ -122,11 +121,7 @@ check_breakpoints :: proc(cpu: ^CPU) -> (bool, Breakpoint_Proc) {
 	return false, nil
 }
 
-process_breakpoints :: proc(cpu: ^CPU, mem: ^GB_Memory) -> bool {
-	if cpu.exec_op == 0xCB { 	// don't break on PREFIX instruction
-		return false
-	}
-
+process_breakpoints :: proc(cpu: ^CPU, mem: ^GB_Memory, prefixed: bool) -> bool {
 	if cpu.skip_breakpoint {
 		return false
 	}
@@ -136,7 +131,7 @@ process_breakpoints :: proc(cpu: ^CPU, mem: ^GB_Memory) -> bool {
 		cpu.break_next = false
 		cpu.skip_breakpoint = true
 
-		instr := get_instruction(cpu, cpu.exec_op)
+		instr := get_instruction(cpu, cpu.exec_op, prefixed)
 
 		log.debugf(
 			"Breakpoint: 0x%4x - %s (0x%2x) (FFA6 = %x)",
@@ -151,7 +146,7 @@ process_breakpoints :: proc(cpu: ^CPU, mem: ^GB_Memory) -> bool {
 	bp, bp_proc := check_breakpoints(cpu)
 
 	if bp {
-		instr := get_instruction(cpu, cpu.exec_op)
+		instr := get_instruction(cpu, cpu.exec_op, prefixed)
 
 		log.debugf("Breakpoint: 0x%4x - %s (0x%2x)", cpu.pc, instr.mnemonic, cpu.exec_op)
 
@@ -166,29 +161,36 @@ process_breakpoints :: proc(cpu: ^CPU, mem: ^GB_Memory) -> bool {
 	return false
 }
 
-get_instruction :: proc(cpu: ^CPU, op: u8) -> Instruction {
-	instructions := cpu.prefix ? cpu.prefixed_instructions[:] : cpu.instructions[:]
+get_instruction :: proc(cpu: ^CPU, op: u8, prefixed: bool) -> Instruction {
+	instructions := prefixed ? cpu.prefixed_instructions[:] : cpu.instructions[:]
 
 	return instructions[op]
 }
 
 do_fetch_state :: proc(cpu: ^CPU, mem: ^GB_Memory) {
+	if process_interrupts(cpu, mem) {
+		return
+	}
+
 	op := mem_read(mem, cpu.pc)
+	prefixed := false
+
+	if op == 0xCB {
+		prefixed = true
+		cpu.pc += 1
+		op = mem_read(mem, cpu.pc)
+	}
+
 	op_pc := cpu.pc
-	instr := get_instruction(cpu, op)
+	instr := get_instruction(cpu, op, prefixed)
 
 	cpu.exec_op = op
 
-	if process_breakpoints(cpu, mem) {
+	if process_breakpoints(cpu, mem, prefixed) {
 		return // we hit a breakpoint
 	}
 
-	if process_interrupts(cpu, mem) {
-		return // some interrupt has to be executed
-	}
-
 	cpu.pc += 1
-	cpu.prefix = false
 
 	data: u16 = 0
 	len := instr.len - 1
@@ -203,9 +205,15 @@ do_fetch_state :: proc(cpu: ^CPU, mem: ^GB_Memory) {
 		// log.debugf("0x%x - %s (0x%x) 0x%x (SP: %d)", op_pc, instr.mnemonic, op, data, cpu.sp)
 		// print_cpu(cpu)
 	}
+
 	instr.func(cpu, mem, data)
-	cpu.exec_cyles = instr.cycles - 1
+
 	cpu.state = CPU_State.ExecuteInstruction
+	cpu.exec_cyles = instr.cycles - 1
+
+	if prefixed {
+		cpu.exec_cyles += 4
+	}
 }
 
 do_execute_instruction_state :: proc(cpu: ^CPU) {
@@ -281,7 +289,6 @@ process_interrupts :: proc(cpu: ^CPU, mem: ^GB_Memory) -> bool {
 	for interrupt in Interrupt {
 		if check_interrupt(cpu, mem, interrupt) {
 			execute_interrupt(cpu, mem, interrupt)
-
 			return true
 		}
 	}
@@ -301,9 +308,9 @@ execute_interrupt :: proc(cpu: ^CPU, mem: ^GB_Memory, interrupt: Interrupt) {
 	i_f := mem_read(mem, u16(GB_HardRegister.IF))
 	i_f &= ~(1 << u8(interrupt))
 
+	cpu.ime = false
 	mem_write(mem, u16(GB_HardRegister.IF), i_f)
 	call(cpu, mem, cpu.interrupt_handlers[interrupt])
-	cpu.ime = false
 	cpu.state = CPU_State.ExecuteInterrupt
 	cpu.exec_cyles = 5 * 4 // interrupt handle takes 5 M-cycles
 }
@@ -885,7 +892,7 @@ HALT_0x76 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
    Flags: - - - -
  */
 PREFIX_0xcb :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
-	cpu.prefix = true
+	panic("should never go here")
 }
 
 /*
@@ -3367,8 +3374,8 @@ RET_0xd8 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
    Flags: - - - -
  */
 RETI_0xd9 :: proc(cpu: ^CPU, mem: ^GB_Memory, data: u16) {
-	ret(cpu, mem)
 	cpu.ime = true
+	ret(cpu, mem)
 }
 
 /*
