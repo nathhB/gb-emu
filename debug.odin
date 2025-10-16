@@ -111,16 +111,22 @@ draw_debugger_info :: proc(gb: ^GB) {
 	}
 }
 
-process_debug_inputs :: proc(cpu: ^CPU, mem: ^GB_Memory, ppu: ^PPU, debug_ctx: ^GB_Debug_Context) {
+process_debug_inputs :: proc(gb: ^GB, debug_ctx: ^GB_Debug_Context) {
+	if rl.IsKeyDown(rl.KeyboardKey.ENTER) {
+		gb.speed = 8
+	} else {
+		gb.speed = 1
+	}
+
 	if rl.IsKeyPressed(rl.KeyboardKey.D) {
-		dump_memory(cpu, mem, 0x8000, 0x8800)
+		dump_memory(&gb.cpu, &gb.mem, 0xFE00, 0xFE9F)
 	}
 
 	if rl.IsKeyPressed(rl.KeyboardKey.T) {
 		debug_ctx.show_tileset_texture = !debug_ctx.show_tileset_texture
 
 		if debug_ctx.show_tileset_texture {
-			update_tileset_texture(ppu, mem, debug_ctx.tileset_texture.texture)
+			update_tileset_texture(&gb.ppu, &gb.mem, debug_ctx.tileset_texture.texture)
 		}
 	}
 }

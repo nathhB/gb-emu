@@ -22,11 +22,13 @@ OBP1_Addr :: 0xFF49
 PPU :: struct {
 	scanline:         u8,
 	mode:             PPU_Mode,
-	colors:           [4]rl.Color,
 	framebuffer:      [ScreenWidth * ScreenHeight]rl.Color,
 	scanline_objects: sa.Small_Array(MaxObjectsPerScanline, PPU_Object),
 	states:           [4]PPU_State,
 	interrupt_line:   bool,
+	bg_palette:       PPU_Palette,
+	obj0_palette:     PPU_Palette,
+	obj1_palette:     PPU_Palette,
 }
 
 PPU_Mode :: enum {
@@ -79,6 +81,8 @@ PPU_Object_Attr :: enum {
 	DMG_Palette = 4,
 }
 
+PPU_Palette :: [4]rl.Color
+
 ppu_init :: proc(ppu: ^PPU, mem: ^GB_Memory) {
 	ppu.scanline = 0
 	ppu.mode = PPU_Mode.OAM_Scan
@@ -105,12 +109,19 @@ ppu_init :: proc(ppu: ^PPU, mem: ^GB_Memory) {
 		PPU_Mode.HBlank,
 	)
 
-	// TODO: add palette support
-	color0 := rl.WHITE
-	color1 := rl.ORANGE
-	color2 := rl.RED
-	color3 := rl.BLACK
-	ppu.colors = [4]rl.Color{color0, color1, color2, color3}
+	ppu.bg_palette = [4]rl.Color{rl.WHITE, rl.ORANGE, rl.RED, rl.BLACK}
+	ppu.obj0_palette = [4]rl.Color {
+		rl.Color{136, 192, 112, 255},
+		rl.Color{52, 104, 86, 255},
+		rl.Color{8, 24, 32, 255},
+		rl.Color{224, 248, 208, 255},
+	}
+	ppu.obj1_palette = [4]rl.Color {
+		rl.Color{0, 170, 188, 255},
+		rl.Color{0, 110, 132, 255},
+		rl.Color{0, 68, 75, 255},
+		rl.Color{224, 248, 208, 255},
+	}
 }
 
 ppu_tick :: proc(gb: ^GB, tick: u64) {
@@ -274,10 +285,21 @@ get_color_from_palette :: proc(
 	color_id: u8,
 ) -> rl.Color {
 	mask := u8(0x3) << (color_id * 2)
-	palette := mem_read(mem, BGP_Addr)
-	palette_color := (palette & mask) >> (color_id * 2)
+	palette_data := mem_read(mem, BGP_Addr)
+	palette_color_id := (palette_data & mask) >> (color_id * 2)
+	palette: ^PPU_Palette
 
-	return ppu.colors[palette_color]
+	if palette_addr == BGP_Addr {
+		palette = &ppu.bg_palette
+	} else if palette_addr == OBP0_Addr {
+		palette = &ppu.obj0_palette
+	} else if palette_addr == OBP1_Addr {
+		palette = &ppu.obj1_palette
+	} else {
+		panic("unexpected palette address")
+	}
+
+	return palette[palette_color_id]
 }
 
 get_bg_tile_id :: proc(mem: ^GB_Memory, x: int, y: int) -> u8 {
@@ -469,6 +491,7 @@ scan_oam :: proc(ppu: ^PPU, mem: ^GB_Memory) {
 			attrs := mem_read(mem, obj_addr + 3)
 
 			sa.append(&ppu.scanline_objects, PPU_Object{x_pos, y_pos, obj_height, tile_id, attrs})
+			// log.debugf("%x %x %d %x %x", x_pos, y_pos, obj_height, tile_id, attrs)
 		}
 	}
 }

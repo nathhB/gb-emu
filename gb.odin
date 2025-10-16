@@ -88,7 +88,6 @@ gb_init :: proc(gb: ^GB) {
 	ppu_init(&gb.ppu, &gb.mem)
 
 	gb.mem.data[GB_HardRegister.JOYPAD] = 0xFF
-	gb.speed = 4 // start at x4 to go through the booting phase quicker
 }
 
 gb_run :: proc(gb: ^GB) {
@@ -105,12 +104,11 @@ gb_run :: proc(gb: ^GB) {
 		if !gb.booted && mem_read(&gb.mem, 0xFF50) != 0 {
 			unload_boot_rom(gb)
 			gb.booted = true
-			gb.speed = 1
 		}
 
 		if gb.cpu.breakpoint == 0 {
 			do_frame(gb)
-			process_debug_inputs(&gb.cpu, &gb.mem, &gb.ppu, &debug_ctx)
+			process_debug_inputs(gb, &debug_ctx)
 		} else {
 			process_debugger_inputs(&gb.cpu)
 		}

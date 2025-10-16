@@ -83,7 +83,9 @@ write_to_joypad :: proc(mem: ^GB_Memory, byte: u8) {
 		} else if rl.IsKeyDown(rl.KeyboardKey.DOWN) {
 			data &= ~(u8(1) << 3)
 		}
-	} else if select_buttons {
+	}
+
+	if select_buttons {
 		if rl.IsKeyDown(rl.KeyboardKey.A) {
 			data &= ~u8(1)
 		} else if rl.IsKeyDown(rl.KeyboardKey.B) {
