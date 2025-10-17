@@ -10,7 +10,7 @@ main :: proc() {
 
 	gb_init(&gb)
 
-	rom_path := "ROMS/cpu_instrs.gb"
+	rom_path := "ROMS/tetris.gb"
 
 	err := gb_load_rom(&gb, rom_path)
 

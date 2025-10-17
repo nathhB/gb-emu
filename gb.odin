@@ -23,6 +23,18 @@ GB :: struct {
 	timer_enabled: bool,
 	timer_dots:    u64,
 	speed:         int,
+	inputs:        Input_State,
+}
+
+Input_State :: struct {
+	left:   bool,
+	right:  bool,
+	up:     bool,
+	down:   bool,
+	a:      bool,
+	b:      bool,
+	start:  bool,
+	select: bool,
 }
 
 GB_Debug_Context :: struct {
@@ -107,6 +119,7 @@ gb_run :: proc(gb: ^GB) {
 		}
 
 		if gb.cpu.breakpoint == 0 {
+			read_inputs(gb)
 			do_frame(gb)
 			process_debug_inputs(gb, &debug_ctx)
 		} else {
@@ -243,6 +256,17 @@ do_frame :: proc(gb: ^GB) {
 			timer_tick(gb)
 		}
 	}
+}
+
+read_inputs :: proc(gb: ^GB) {
+	gb.inputs.right = rl.IsKeyDown(rl.KeyboardKey.RIGHT)
+	gb.inputs.left = rl.IsKeyDown(rl.KeyboardKey.LEFT)
+	gb.inputs.up = rl.IsKeyDown(rl.KeyboardKey.UP)
+	gb.inputs.down = rl.IsKeyDown(rl.KeyboardKey.DOWN)
+	gb.inputs.a = rl.IsKeyDown(rl.KeyboardKey.Q)
+	gb.inputs.b = rl.IsKeyDown(rl.KeyboardKey.B)
+	gb.inputs.select = rl.IsKeyDown(rl.KeyboardKey.S)
+	gb.inputs.start = rl.IsKeyDown(rl.KeyboardKey.SPACE)
 }
 
 read_rom_header :: proc(rom: []u8) -> ROM_Header {

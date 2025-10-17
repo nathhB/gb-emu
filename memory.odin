@@ -74,27 +74,17 @@ write_to_joypad :: proc(gb: ^GB, byte: u8) {
 	select_dpad := (data & (1 << 4)) == 0
 
 	if select_dpad {
-		if rl.IsKeyDown(rl.KeyboardKey.RIGHT) {
-			data &= ~u8(1)
-		} else if rl.IsKeyDown(rl.KeyboardKey.LEFT) {
-			data &= ~(u8(1) << 1)
-		} else if rl.IsKeyDown(rl.KeyboardKey.UP) {
-			data &= ~(u8(1) << 2)
-		} else if rl.IsKeyDown(rl.KeyboardKey.DOWN) {
-			data &= ~(u8(1) << 3)
-		}
+		data &= ~u8(gb.inputs.right)
+		data &= ~(u8(gb.inputs.left) << 1)
+		data &= ~(u8(gb.inputs.up) << 2)
+		data &= ~(u8(gb.inputs.down) << 3)
 	}
 
 	if select_buttons {
-		if rl.IsKeyDown(rl.KeyboardKey.A) {
-			data &= ~u8(1)
-		} else if rl.IsKeyDown(rl.KeyboardKey.B) {
-			data &= ~(u8(1) << 1)
-		} else if rl.IsKeyDown(rl.KeyboardKey.S) {
-			data &= ~(u8(1) << 2)
-		} else if rl.IsKeyDown(rl.KeyboardKey.SPACE) {
-			data &= ~(u8(1) << 3)
-		}
+		data &= ~u8(gb.inputs.a)
+		data &= ~(u8(gb.inputs.b) << 1)
+		data &= ~(u8(gb.inputs.select) << 2)
+		data &= ~(u8(gb.inputs.start) << 3)
 	}
 
 	gb.mem.write(gb, u16(GB_HardRegister.JOYPAD), data)
