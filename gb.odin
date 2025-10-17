@@ -232,13 +232,13 @@ unload_boot_rom :: proc(gb: ^GB) {
 do_frame :: proc(gb: ^GB) {
 	for f := 0; f < gb.speed; f += 1 {
 		for t: u64 = 0; t < FrameDots; t += 1 {
-			cpu_tick(&gb.cpu, &gb.mem)
+			cpu_tick(gb)
 
 			if gb.cpu.breakpoint > 0 {
 				return
 			}
 
-			mem_tick(&gb.mem)
+			mem_tick(gb)
 			ppu_tick(gb, t)
 			timer_tick(gb)
 		}

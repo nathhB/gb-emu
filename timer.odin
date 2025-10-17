@@ -61,12 +61,12 @@ process_timer :: proc(gb: ^GB) {
 		tima += 1
 
 		if tima > 0xFF {
-			cpu_request_interrupt(&gb.cpu, &gb.mem, Interrupt.Timer)
+			cpu_request_interrupt(gb, Interrupt.Timer)
 
 			tima = 0
 		}
 
-		mem_write(&gb.mem, u16(GB_HardRegister.TIMA), u8(tima))
+		mem_write(gb, u16(GB_HardRegister.TIMA), u8(tima))
 		gb.timer_acc = 0
 	}
 }

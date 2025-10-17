@@ -10,7 +10,7 @@ GB_Memory :: struct {
 	ram_bank:     int,
 	external_ram: bool,
 	read:         proc(mem: ^GB_Memory, addr: u16) -> u8,
-	write:        proc(mem: ^GB_Memory, addr: u16, byte: u8),
+	write:        proc(gb: ^GB, addr: u16, byte: u8),
 	get_ptr:      proc(mem: ^GB_Memory, addr: u16) -> ^u8,
 	oam_transfer: struct {
 		active:   bool,
@@ -19,14 +19,14 @@ GB_Memory :: struct {
 	},
 }
 
-mem_write :: proc(mem: ^GB_Memory, addr: u16, byte: u8) {
+mem_write :: proc(gb: ^GB, addr: u16, byte: u8) {
 	if addr >= 0xFF00 {
-		write_to_hardware_register(mem, addr, byte)
+		write_to_hardware_register(gb, addr, byte)
 
 		return
 	}
 
-	mem.write(mem, addr, byte)
+	gb.mem.write(gb, addr, byte)
 }
 
 mem_read :: proc(mem: ^GB_Memory, addr: u16) -> u8 {
@@ -43,32 +43,32 @@ mem_get_ptr :: proc(mem: ^GB_Memory, addr: u16) -> ^u8 {
 	return mem.get_ptr(mem, addr)
 }
 
-mem_tick :: proc(mem: ^GB_Memory) {
-	if mem.oam_transfer.active {
-		do_oam_transfer(mem)
+mem_tick :: proc(gb: ^GB) {
+	if gb.mem.oam_transfer.active {
+		do_oam_transfer(gb)
 	}
 }
 
 // https://gbdev.io/pandocs/Hardware_Reg_List.html
-write_to_hardware_register :: proc(mem: ^GB_Memory, addr: u16, byte: u8) {
+write_to_hardware_register :: proc(gb: ^GB, addr: u16, byte: u8) {
 	reg := GB_HardRegister(addr)
 
 	if reg == GB_HardRegister.JOYPAD {
-		write_to_joypad(mem, byte)
+		write_to_joypad(gb, byte)
 	} else if reg == GB_HardRegister.DIV {
-		write_to_div(mem)
+		write_to_div(gb)
 	} else if reg == GB_HardRegister.DMA {
-		start_dma_transfer(mem, byte)
+		start_dma_transfer(&gb.mem, byte)
 	} else if reg == GB_HardRegister.STAT {
-		mem.write(mem, addr, byte & 0x78)
+		gb.mem.write(gb, addr, byte & 0x78)
 	} else if reg >= GB_HardRegister.NR10 && reg <= GB_HardRegister.NR34 {
-		write_to_audio_registers(mem, reg, byte)
+		write_to_audio_registers(gb, reg, byte)
 	} else {
-		mem.write(mem, addr, byte)
+		gb.mem.write(gb, addr, byte)
 	}
 }
 
-write_to_joypad :: proc(mem: ^GB_Memory, byte: u8) {
+write_to_joypad :: proc(gb: ^GB, byte: u8) {
 	data := u8(0xCF | byte)
 	select_buttons := (data & (1 << 5)) == 0
 	select_dpad := (data & (1 << 4)) == 0
@@ -97,15 +97,15 @@ write_to_joypad :: proc(mem: ^GB_Memory, byte: u8) {
 		}
 	}
 
-	mem.write(mem, u16(GB_HardRegister.JOYPAD), data)
+	gb.mem.write(gb, u16(GB_HardRegister.JOYPAD), data)
 }
 
-write_to_audio_registers :: proc(mem: ^GB_Memory, reg: GB_HardRegister, byte: u8) {
+write_to_audio_registers :: proc(gb: ^GB, reg: GB_HardRegister, byte: u8) {
 	// log.debugf("WRITE TO AUDIO: %w: %x", reg, byte)
 }
 
-write_to_div :: proc(mem: ^GB_Memory) {
-	mem.write(mem, u16(GB_HardRegister.DIV), 0)
+write_to_div :: proc(gb: ^GB) {
+	gb.mem.write(gb, u16(GB_HardRegister.DIV), 0) // writing to DIV resets it
 }
 
 // https://gbdev.io/pandocs/OAM_DMA_Transfer.html#ff46--dma-oam-dma-source-address--start
@@ -118,11 +118,12 @@ start_dma_transfer :: proc(mem: ^GB_Memory, byte: u8) {
 	mem.oam_transfer.current = 0
 }
 
-do_oam_transfer :: proc(mem: ^GB_Memory) {
+do_oam_transfer :: proc(gb: ^GB) {
+	mem := &gb.mem
 	current := u16(mem.oam_transfer.current)
 	src_byte := mem_read(mem, mem.oam_transfer.src_addr + current)
 
-	mem_write(mem, 0xFE00 + current, src_byte)
+	mem_write(gb, 0xFE00 + current, src_byte)
 	mem.oam_transfer.current += 1
 
 	if mem.oam_transfer.current == 160 {

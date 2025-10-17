@@ -130,7 +130,7 @@ ppu_tick :: proc(gb: ^GB, tick: u64) {
 	lyc := mem_read(&gb.mem, u16(GB_HardRegister.LYC))
 	ppu.scanline = u8(tick / ScanelineDots)
 
-	mem_write(&gb.mem, u16(GB_HardRegister.LY), ppu.scanline)
+	mem_write(gb, u16(GB_HardRegister.LY), ppu.scanline)
 	handle_lcd_interrupts(gb, stat, lyc)
 	update_lcd_status(gb, stat, lyc)
 
@@ -180,7 +180,7 @@ handle_lcd_interrupts :: proc(gb: ^GB, stat: u8, lyc: u8) {
 
 
 	if !gb.ppu.interrupt_line && interrupt_line {
-		cpu_request_interrupt(&gb.cpu, &gb.mem, Interrupt.LCD)
+		cpu_request_interrupt(gb, Interrupt.LCD)
 	}
 
 	gb.ppu.interrupt_line = interrupt_line
@@ -196,7 +196,7 @@ update_lcd_status :: proc(gb: ^GB, stat: u8, lyc: u8) {
 	}
 
 	// don't use mem_write intentionally
-	gb.mem.write(&gb.mem, u16(GB_HardRegister.STAT), stat)
+	gb.mem.write(gb, u16(GB_HardRegister.STAT), stat)
 }
 
 check_lcd_interrupt_enabled :: proc(stat: u8, interrupt: PPU_Status) -> bool {
@@ -210,7 +210,7 @@ oam_scan_on_enter :: proc(gb: ^GB) {
 
 vlank_on_enter :: proc(gb: ^GB) {
 	assert(gb.ppu.mode == PPU_Mode.VBlank)
-	cpu_request_interrupt(&gb.cpu, &gb.mem, Interrupt.VBlank)
+	cpu_request_interrupt(gb, Interrupt.VBlank)
 }
 
 draw_pixels_on_update :: proc(gb: ^GB, tick: u64) {
