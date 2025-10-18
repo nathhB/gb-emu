@@ -51,6 +51,11 @@ mem_tick :: proc(gb: ^GB) {
 
 // https://gbdev.io/pandocs/Hardware_Reg_List.html
 write_to_hardware_register :: proc(gb: ^GB, addr: u16, byte: u8) {
+	if is_audio_register(addr) {
+		apu_write_register(gb, GB_Audio_Registers(addr), byte)
+		return
+	}
+
 	reg := GB_HardRegister(addr)
 
 	if reg == GB_HardRegister.JOYPAD {
@@ -61,11 +66,33 @@ write_to_hardware_register :: proc(gb: ^GB, addr: u16, byte: u8) {
 		start_dma_transfer(&gb.mem, byte)
 	} else if reg == GB_HardRegister.STAT {
 		gb.mem.write(gb, addr, byte & 0x78)
-	} else if reg >= GB_HardRegister.NR10 && reg <= GB_HardRegister.NR34 {
-		write_to_audio_registers(gb, reg, byte)
 	} else {
 		gb.mem.write(gb, addr, byte)
 	}
+}
+
+is_audio_register :: proc(addr: u16) -> bool {
+	if addr >= u16(GB_Audio_Registers.NR10) && addr <= u16(GB_Audio_Registers.NR14) {
+		return true
+	}
+
+	if addr >= u16(GB_Audio_Registers.NR21) && addr <= u16(GB_Audio_Registers.NR24) {
+		return true
+	}
+
+	if addr >= u16(GB_Audio_Registers.NR30) && addr <= u16(GB_Audio_Registers.NR34) {
+		return true
+	}
+
+	if addr >= u16(GB_Audio_Registers.NR41) && addr <= u16(GB_Audio_Registers.NR44) {
+		return true
+	}
+
+	if addr >= u16(GB_Audio_Registers.NR50) && addr <= u16(GB_Audio_Registers.NR52) {
+		return true
+	}
+
+	return false
 }
 
 write_to_joypad :: proc(gb: ^GB, byte: u8) {
@@ -91,7 +118,6 @@ write_to_joypad :: proc(gb: ^GB, byte: u8) {
 }
 
 write_to_audio_registers :: proc(gb: ^GB, reg: GB_HardRegister, byte: u8) {
-	// log.debugf("WRITE TO AUDIO: %w: %x", reg, byte)
 }
 
 write_to_div :: proc(gb: ^GB) {

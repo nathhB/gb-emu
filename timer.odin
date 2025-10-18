@@ -45,6 +45,11 @@ process_div :: proc(gb: ^GB) {
 	gb.div_acc += 1
 
 	if gb.div_acc >= DivDots {
+		// https://gbdev.io/pandocs/Audio_details.html#div-apu
+		if (div & 0x8) > 0 && ((div + 1) & 0x8) == 0 {
+			apu_div_timer(gb)
+		}
+
 		div += 1
 		gb.div_acc = 0
 	}
