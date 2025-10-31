@@ -41,12 +41,11 @@ get_clock_dots :: proc(type: u8) -> u64 {
 
 process_div :: proc(gb: ^GB) {
 	div := mem_read(&gb.mem, u16(GB_HardRegister.DIV))
-
 	gb.div_acc += 1
 
 	if gb.div_acc >= DivDots {
 		// https://gbdev.io/pandocs/Audio_details.html#div-apu
-		if (div & 0x8) > 0 && ((div + 1) & 0x8) == 0 {
+		if (div & 0x10) > 0 && ((div + 1) & 0x10) == 0 {
 			apu_div_timer(gb)
 		}
 
@@ -55,7 +54,7 @@ process_div :: proc(gb: ^GB) {
 	}
 
 	// can't use mem_write here or it will reset the register to 0
-	gb.mem.data[u16(GB_HardRegister.DIV)] = div
+	gb.mem.write(gb, u16(GB_HardRegister.DIV), div)
 }
 
 process_timer :: proc(gb: ^GB) {

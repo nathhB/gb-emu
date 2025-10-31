@@ -117,10 +117,15 @@ write_to_joypad :: proc(gb: ^GB, byte: u8) {
 	gb.mem.write(gb, u16(GB_HardRegister.JOYPAD), data)
 }
 
-write_to_audio_registers :: proc(gb: ^GB, reg: GB_HardRegister, byte: u8) {
-}
-
 write_to_div :: proc(gb: ^GB) {
+	div := mem_read(&gb.mem, u16(GB_HardRegister.DIV))
+
+	// https://gbdev.io/pandocs/Audio_details.html#div-apu
+	// resetting DIV while bit 4 is set triggers DIV-APU
+	if (div & 0x10) > 0 {
+		apu_div_timer(gb)
+	}
+
 	gb.mem.write(gb, u16(GB_HardRegister.DIV), 0) // writing to DIV resets it
 }
 

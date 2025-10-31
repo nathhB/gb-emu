@@ -9,8 +9,9 @@ main :: proc() {
 	gb := GB{}
 
 	gb_init(&gb)
+	defer gb_deinit(&gb)
 
-	rom_path := "ROMS/zelda.gb"
+	rom_path := "ROMS/tetris.gb"
 
 	err := gb_load_rom(&gb, rom_path)
 

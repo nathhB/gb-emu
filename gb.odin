@@ -104,8 +104,13 @@ GB_Audio_Registers :: enum u16 {
 gb_init :: proc(gb: ^GB) {
 	cpu_init(&gb.cpu)
 	ppu_init(&gb.ppu, &gb.mem)
+	apu_init(&gb.apu)
 
 	gb.mem.data[GB_HardRegister.JOYPAD] = 0xFF
+}
+
+gb_deinit :: proc(gb: ^GB) {
+	apu_deinit(&gb.apu)
 }
 
 gb_run :: proc(gb: ^GB) {
@@ -259,6 +264,7 @@ do_frame :: proc(gb: ^GB) {
 
 			mem_tick(gb)
 			ppu_tick(gb, t)
+			apu_tick(gb)
 			timer_tick(gb)
 		}
 	}
