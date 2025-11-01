@@ -5,7 +5,7 @@ import "core:os"
 import rl "vendor:raylib"
 
 main :: proc() {
-	context.logger = log.create_console_logger()
+	// context.logger = log.create_console_logger()
 	gb := GB{}
 
 	gb_init(&gb)

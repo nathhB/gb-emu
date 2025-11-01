@@ -1,8 +1,12 @@
 package gb_emu
 
+import intrinsics "base:intrinsics"
+import "base:runtime"
 import "core:c"
+import libc "core:c/libc"
 import "core:fmt"
 import "core:log"
+import "core:sync"
 import rl "vendor:raylib"
 
 Audio_Sample_Rate :: 44_100
@@ -10,18 +14,18 @@ Audio_Sample_Size :: 16
 Pulse_Sample_Rate :: 1048576
 Pulse_Sample_Ticks :: Pulse_Sample_Rate / Audio_Sample_Rate
 Audio_Chunk_Size :: 512
-Audio_Buffer_Size :: Audio_Chunk_Size * 2
+Audio_Buffer_Size :: Audio_Chunk_Size * 8
 
 APU :: struct {
-	enabled:                  bool,
-	channel2:                 APU_Channel2,
-	dacs:                     [4]APU_DAC,
-	audio_buffer:             [Audio_Buffer_Size]i16, // 16 bits sample
-	audio_buffer_write_index: int,
-	audio_buffer_read_index:  int,
-	audio_chunk_ready:        bool,
-	audio_stream:             rl.AudioStream,
+	enabled:      bool,
+	channel2:     APU_Channel2,
+	dacs:         [4]APU_DAC,
+	audio_stream: rl.AudioStream,
 }
+
+audio_buffer: [Audio_Buffer_Size]i16
+audio_buffer_write_index: int
+audio_buffer_read_index: int
 
 APU_Channel2 :: struct {
 	enabled:             bool,
@@ -47,14 +51,49 @@ APU_DAC :: struct {
 	enabled: bool,
 }
 
-audio_callback :: proc(buffer: rawptr, frames: c.uint) {
+audio_callback :: proc(buffer_ptr: rawptr, frames: c.uint) {
+	context = runtime.default_context()
+
+	buffer := (^i16)(buffer_ptr)
+	available_frames := 0
+	write_index := sync.atomic_load(&audio_buffer_write_index)
+
+	if write_index < audio_buffer_read_index {
+		// write index has wrapped around
+		available_frames = (len(audio_buffer) - 1 + write_index) - audio_buffer_read_index
+	} else {
+		available_frames = write_index - audio_buffer_read_index
+	}
+
+	if available_frames > int(frames) {
+		available_frames = int(frames)
+	}
+
+	// fmt.printfln(
+	// 	"write_index = %d, read_index = %d, requested_frames = %d, available_frames = %d",
+	// 	write_index,
+	// 	audio_buffer_read_index,
+	// 	int(frames),
+	// 	available_frames,
+	// )
+
+	for i := 0; i < int(frames); i += 1 {
+		frame_value: i16 = 0
+
+		if i < available_frames {
+			frame_value = audio_buffer[audio_buffer_read_index]
+			audio_buffer_read_index = (audio_buffer_read_index + 1) % len(audio_buffer)
+		}
+
+		libc.memcpy(intrinsics.ptr_offset(buffer, i), &frame_value, 2)
+	}
 }
 
 apu_init :: proc(apu: ^APU) {
 	rl.InitAudioDevice()
 	rl.SetAudioStreamBufferSizeDefault(Audio_Chunk_Size)
 	apu.audio_stream = rl.LoadAudioStream(Audio_Sample_Rate, Audio_Sample_Size, 1)
-	// rl.SetAudioStreamCallback(apu.audio_stream, rl.AudioCallback(audio_callback))
+	rl.SetAudioStreamCallback(apu.audio_stream, rl.AudioCallback(audio_callback))
 	rl.PlayAudioStream(apu.audio_stream)
 }
 
@@ -76,21 +115,6 @@ apu_tick :: proc(gb: ^GB) {
 
 	if apu.channel2.enabled {
 		channel2_tick(gb)
-	}
-
-	// TODO: try to reset audio buffer stuff on channel trigger
-	if rl.IsAudioStreamProcessed(apu.audio_stream) {
-		if apu.audio_chunk_ready {
-			data_start := apu.audio_buffer_read_index
-			data_end := apu.audio_buffer_read_index + Audio_Chunk_Size
-			data := apu.audio_buffer[data_start:data_end]
-
-			rl.UpdateAudioStream(apu.audio_stream, raw_data(data), Audio_Chunk_Size)
-
-			apu.audio_buffer_read_index =
-				(apu.audio_buffer_read_index + Audio_Chunk_Size) % len(apu.audio_buffer)
-			apu.audio_chunk_ready = false
-		}
 	}
 }
 
@@ -192,9 +216,8 @@ write_to_channel2 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 			channel.tone_freq = tone_freq
 			channel.volume = channel.init_volume
 
-			apu.audio_buffer_write_index = 0
-			apu.audio_buffer_read_index = 0
-			apu.audio_chunk_ready = false
+			audio_buffer_write_index = 0
+			audio_buffer_read_index = 0
 
 			report_channel_status(gb, 1, true)
 		}
@@ -239,8 +262,7 @@ channel2_tick :: proc(gb: ^GB) {
 
 	// Sample at 44100 Hz
 	if channel.sample_tick == Pulse_Sample_Ticks {
-		// volume_level := f32(channel.volume) / 15
-		volume_level := channel.volume == 0 ? 0 : f32(0.8) // TODO:
+		volume_level := f32(channel.volume) / f32(15)
 		write_frame_to_audio_buffer(&gb.apu, channel.current_frame_value * volume_level)
 		channel.sample_tick = 0
 	}
@@ -335,10 +357,6 @@ get_pulse_wave_value :: proc(wave_duty: u8, frame: int) -> f32 {
 write_frame_to_audio_buffer :: proc(apu: ^APU, frame_value: f32) {
 	// frame_value is [-1.0, +1.0]
 
-	apu.audio_buffer[apu.audio_buffer_write_index] = i16(frame_value * f32(32_767))
-	apu.audio_buffer_write_index = (apu.audio_buffer_write_index + 1) % len(apu.audio_buffer)
-
-	if apu.audio_buffer_write_index % Audio_Chunk_Size == 0 {
-		apu.audio_chunk_ready = true
-	}
+	audio_buffer[audio_buffer_write_index] = i16(frame_value * f32(32_767))
+	audio_buffer_write_index = (audio_buffer_write_index + 1) % len(audio_buffer)
 }
