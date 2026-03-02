@@ -14,7 +14,7 @@ Audio_Sample_Size :: 16
 Pulse_Sample_Rate :: 1048576
 Pulse_Sample_Ticks :: Pulse_Sample_Rate / Audio_Sample_Rate
 Audio_Chunk_Size :: 512
-Audio_Buffer_Size :: Audio_Chunk_Size * 8
+Audio_Buffer_Size :: Audio_Chunk_Size * 16
 
 APU :: struct {
 	enabled:      bool,
@@ -28,23 +28,24 @@ audio_buffer_write_index: int
 audio_buffer_read_index: int
 
 APU_Channel2 :: struct {
-	enabled:             bool,
-	expire_enabled:      bool,
-	expire_timer:        u8,
-	env_timer:           u8,
-	period_div:          u16,
-	volume:              uint,
-	init_volume:         uint,
-	init_expire_timer:   u8,
-	wave_duty:           u8,
-	env_dir:             u8,
-	sweep_pace:          u8,
-	div_tick:            u8,
-	apu_dots:            int,
-	sample_tick:         int,
-	tone_freq:           int,
-	current_frame:       int,
-	current_frame_value: f32,
+	enabled:            bool,
+	expire_enabled:     bool,
+	expire_timer:       u8,
+	env_timer:          u8,
+	period_timer:       u16,
+	volume:             uint,
+	init_volume:        uint,
+	init_expire_timer:  u8,
+	wave_duty:          u8,
+	env_dir:            u8,
+	sweep_pace:         u8,
+	div_tick:           u8,
+	apu_dots:           int,
+	sample_tick:        int,
+	tone_freq:          int,
+	current_frame:      int,
+	acc_frame_value:    f32,
+	current_wave_value: f32,
 }
 
 APU_DAC :: struct {
@@ -52,7 +53,7 @@ APU_DAC :: struct {
 }
 
 audio_callback :: proc(buffer_ptr: rawptr, frames: c.uint) {
-	context = runtime.default_context()
+	// context = runtime.default_context()
 
 	buffer := (^i16)(buffer_ptr)
 	available_frames := 0
@@ -65,8 +66,10 @@ audio_callback :: proc(buffer_ptr: rawptr, frames: c.uint) {
 		available_frames = write_index - audio_buffer_read_index
 	}
 
-	if available_frames > int(frames) {
-		available_frames = int(frames)
+	frames := int(frames)
+
+	if available_frames > frames {
+		available_frames = frames
 	}
 
 	// fmt.printfln(
@@ -77,7 +80,7 @@ audio_callback :: proc(buffer_ptr: rawptr, frames: c.uint) {
 	// 	available_frames,
 	// )
 
-	for i := 0; i < int(frames); i += 1 {
+	for i := 0; i < frames; i += 1 {
 		frame_value: i16 = 0
 
 		if i < available_frames {
@@ -207,12 +210,12 @@ write_to_channel2 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 
 			channel.enabled = true
 			channel.apu_dots = 0
-			channel.current_frame_value = 0
+			channel.acc_frame_value = 0
 			channel.current_frame = 0
 			channel.sample_tick = 0
 			channel.expire_timer = channel.init_expire_timer
 			channel.env_timer = 0
-			channel.period_div = period_value
+			channel.period_timer = 2048 - period_value
 			channel.tone_freq = tone_freq
 			channel.volume = channel.init_volume
 
@@ -225,9 +228,9 @@ write_to_channel2 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 		channel.expire_enabled = byte & 0x40 > 0
 
 		log.debugf(
-			"Channel 2 control: length enabled = %w, period divider = %x",
+			"Channel 2 control: length enabled = %w, period timer = %x",
 			channel.expire_enabled,
-			channel.period_div,
+			channel.period_timer,
 		)
 	}
 
@@ -259,34 +262,40 @@ channel2_tick :: proc(gb: ^GB) {
 
 	channel.apu_dots = 0
 	channel.sample_tick += 1
+	channel.period_timer -= 1
+
+	if channel.period_timer <= 0 {
+		nrx3 := read_audio_register(gb, .NR23)
+		nrx4 := read_audio_register(gb, .NR24)
+		period_value := read_period_value(gb, nrx3, nrx4)
+		tone_freq := compute_tone_freq(period_value)
+
+		if tone_freq != channel.tone_freq {
+			log.debugf(
+				"Channel 2 tone frequency: %d Hz (period value: 0x%x)",
+				tone_freq,
+				period_value,
+			)
+		}
+
+		channel.period_timer = 2048 - period_value
+		channel.tone_freq = tone_freq
+		channel.current_frame = (channel.current_frame + 1) % 8
+		channel.current_wave_value =
+			get_pulse_wave_value(channel.wave_duty, channel.current_frame) * 0.5
+	}
+
+	volume_level := f32(channel.volume) / f32(15)
+	channel.acc_frame_value += channel.current_wave_value * volume_level
 
 	// Sample at 44100 Hz
-	if channel.sample_tick == Pulse_Sample_Ticks {
-		volume_level := f32(channel.volume) / f32(15)
-		write_frame_to_audio_buffer(&gb.apu, channel.current_frame_value * volume_level)
+	if channel.sample_tick >= Pulse_Sample_Ticks {
+		frame_value := channel.acc_frame_value / f32(channel.sample_tick)
+
+		write_frame_to_audio_buffer(&gb.apu, frame_value * volume_level)
 		channel.sample_tick = 0
+		channel.acc_frame_value = 0
 	}
-
-	channel.period_div += 1
-
-	if channel.period_div < 2048 {
-		return
-	}
-
-	nrx3 := read_audio_register(gb, .NR23)
-	nrx4 := read_audio_register(gb, .NR24)
-	period_value := read_period_value(gb, nrx3, nrx4)
-	tone_freq := compute_tone_freq(period_value)
-
-	if tone_freq != channel.tone_freq {
-		log.debugf("Channel 2 tone frequency: %d Hz (period value: 0x%x)", tone_freq, period_value)
-	}
-
-	channel.period_div = period_value
-	channel.tone_freq = tone_freq
-	channel.current_frame = (channel.current_frame + 1) % 8
-	channel.current_frame_value =
-		get_pulse_wave_value(channel.wave_duty, channel.current_frame) * 0.5
 }
 
 channel2_div_tick :: proc(gb: ^GB) {
@@ -299,13 +308,13 @@ channel2_div_tick :: proc(gb: ^GB) {
 		if channel.sweep_pace > 0 {
 			channel.env_timer = (channel.env_timer + 1) % channel.sweep_pace
 
-			if channel.env_timer == 0 {
-				if channel.env_dir == 0 {
-					channel.volume -= 1
-				} else {
-					channel.volume += 1
-				}
-			}
+			// if channel.env_timer == 0 {
+			// 	if channel.env_dir == 0 {
+			// 		channel.volume -= 1
+			// 	} else {
+			// 		channel.volume += 1
+			// 	}
+			// }
 		}
 	} else if channel.div_tick == 2 {
 		// expire update
