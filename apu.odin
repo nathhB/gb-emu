@@ -21,6 +21,7 @@ APU :: struct {
 	channel2:     APU_Channel2,
 	dacs:         [4]APU_DAC,
 	audio_stream: rl.AudioStream,
+	env_timer:    u8,
 }
 
 audio_buffer: [Audio_Buffer_Size]i16
@@ -31,21 +32,22 @@ APU_Channel2 :: struct {
 	enabled:            bool,
 	expire_enabled:     bool,
 	expire_timer:       u8,
-	env_timer:          u8,
 	period_timer:       u16,
-	volume:             uint,
-	init_volume:        uint,
+	volume:             u8,
+	init_volume:        u8,
 	init_expire_timer:  u8,
 	wave_duty:          u8,
 	env_dir:            u8,
+	env_enabled:        bool,
 	sweep_pace:         u8,
-	div_tick:           u8,
 	apu_dots:           int,
 	sample_tick:        int,
 	tone_freq:          int,
 	current_frame:      int,
 	acc_frame_value:    f32,
 	current_wave_value: f32,
+	env_sweep_timer:    u8,
+	trigger_time:       f64,
 }
 
 APU_DAC :: struct {
@@ -98,6 +100,8 @@ apu_init :: proc(apu: ^APU) {
 	apu.audio_stream = rl.LoadAudioStream(Audio_Sample_Rate, Audio_Sample_Size, 1)
 	rl.SetAudioStreamCallback(apu.audio_stream, rl.AudioCallback(audio_callback))
 	rl.PlayAudioStream(apu.audio_stream)
+
+	apu.env_timer = 8
 }
 
 apu_deinit :: proc(apu: ^APU) {
@@ -122,9 +126,21 @@ apu_tick :: proc(gb: ^GB) {
 }
 
 apu_div_timer :: proc(gb: ^GB) {
-	if gb.apu.channel2.enabled {
+	apu := &gb.apu
+
+	apu.env_timer -= 1
+
+	if apu.env_timer == 0 {
+		apu.env_timer = 8
+
+		// log.debugf("APU DIV: %f", dt)
+
 		channel2_div_tick(gb)
 	}
+
+	// if gb.apu.channel2.enabled {
+	// 	channel2_div_tick(gb)
+	// }
 }
 
 write_to_master_control :: proc(gb: ^GB, byte: u8) {
@@ -166,12 +182,13 @@ write_to_channel2 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 			channel.wave_duty,
 		)
 	} else if reg == .NR22 {
-		channel.init_volume = uint((byte & 0xF0) >> 4)
+		channel.init_volume = u8((byte & 0xF0) >> 4)
 		channel.env_dir = (byte & 0x8) > 0 ? 1 : 0
 		channel.sweep_pace = byte & 0x7
 
 		log.debugf(
-			"Channel 2 volume & envelope: init volume = %d, env dir = %x, sweep pace = %x",
+			"Channel 2 volume & envelope (v: %x): init volume = %d, env dir = %x, sweep pace = %x",
+			byte,
 			channel.init_volume,
 			channel.env_dir,
 			channel.sweep_pace,
@@ -193,8 +210,10 @@ write_to_channel2 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 	} else if reg == .NR24 {
 		log.debugf("Channel 2 period high: %x", byte & 0x07)
 
-		if dac.enabled && !channel.enabled && (byte & 0x80 > 0) {
+		if dac.enabled && (byte & 0x80 > 0) {
 			log.debug("Channel 2 triggered")
+
+			channel.trigger_time = rl.GetTime()
 
 			nrx3 := read_audio_register(gb, .NR23)
 			period_value := read_period_value(gb, nrx3, byte)
@@ -214,10 +233,11 @@ write_to_channel2 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 			channel.current_frame = 0
 			channel.sample_tick = 0
 			channel.expire_timer = channel.init_expire_timer
-			channel.env_timer = 0
 			channel.period_timer = 2048 - period_value
 			channel.tone_freq = tone_freq
 			channel.volume = channel.init_volume
+			channel.env_sweep_timer = channel.sweep_pace == 0 ? 8 : channel.sweep_pace
+			channel.env_enabled = channel.sweep_pace > 0
 
 			audio_buffer_write_index = 0
 			audio_buffer_read_index = 0
@@ -281,12 +301,13 @@ channel2_tick :: proc(gb: ^GB) {
 		channel.period_timer = 2048 - period_value
 		channel.tone_freq = tone_freq
 		channel.current_frame = (channel.current_frame + 1) % 8
-		channel.current_wave_value =
-			get_pulse_wave_value(channel.wave_duty, channel.current_frame) * 0.5
+		channel.current_wave_value = get_pulse_wave_value(channel.wave_duty, channel.current_frame)
 	}
 
-	volume_level := f32(channel.volume) / f32(15)
-	channel.acc_frame_value += channel.current_wave_value * volume_level
+	volume_level := f32(channel.volume) / 0xF
+	frame_value := channel.current_wave_value * volume_level
+
+	channel.acc_frame_value += frame_value
 
 	// Sample at 44100 Hz
 	if channel.sample_tick >= Pulse_Sample_Ticks {
@@ -301,34 +322,67 @@ channel2_tick :: proc(gb: ^GB) {
 channel2_div_tick :: proc(gb: ^GB) {
 	channel := &gb.apu.channel2
 
-	channel.div_tick = (channel.div_tick + 1) % 8
+	channel.env_sweep_timer -= 1
 
-	if channel.div_tick == 0 {
-		// envelope update
-		if channel.sweep_pace > 0 {
-			channel.env_timer = (channel.env_timer + 1) % channel.sweep_pace
+	if channel.env_sweep_timer == 0 {
+		channel.env_sweep_timer = channel.sweep_pace == 0 ? 8 : channel.sweep_pace
 
-			// if channel.env_timer == 0 {
-			// 	if channel.env_dir == 0 {
-			// 		channel.volume -= 1
-			// 	} else {
-			// 		channel.volume += 1
-			// 	}
-			// }
+		if channel.volume == 0 || channel.volume == 0xF {
+			channel.env_enabled = false
 		}
-	} else if channel.div_tick == 2 {
-		// expire update
-		if channel.expire_enabled {
-			channel.expire_timer += 1
 
-			if channel.expire_timer >= 64 {
-				channel.enabled = false
-				report_channel_status(gb, 1, false)
-				log.debug("Channel 2 expired")
+		if channel.env_enabled {
+			if channel.env_dir == 0 {
+				channel.volume -= 1
+			} else if channel.env_dir == 1 {
+				channel.volume += 1
 			}
 		}
 	}
+
+	if channel.expire_enabled && channel.expire_timer > 0 {
+		channel.expire_timer -= 1
+
+		if channel.expire_timer == 0 {
+			log.debug("Channel 2 expired")
+
+			channel.enabled = false
+			report_channel_status(gb, 1, false)
+		}
+	}
 }
+
+// channel2_div_tick :: proc(gb: ^GB) {
+// 	channel := &gb.apu.channel2
+//
+// 	channel.div_tick = (channel.div_tick + 1) % 8
+//
+// 	if channel.div_tick == 0 {
+// 		// envelope update
+// 		if channel.sweep_pace > 0 {
+// 			channel.env_timer = (channel.env_timer + 1) % channel.sweep_pace
+//
+// 			if channel.env_timer == 0 {
+// 				if channel.env_dir == 0 {
+// 					channel.volume -= 1
+// 				} else {
+// 					channel.volume += 1
+// 				}
+// 			}
+// 		}
+// 	} else if channel.div_tick == 2 {
+// 		// expire update
+// 		if channel.expire_enabled {
+// 			channel.expire_timer += 1
+//
+// 			if channel.expire_timer >= 64 {
+// 				channel.enabled = false
+// 				report_channel_status(gb, 1, false)
+// 				log.debug("Channel 2 expired")
+// 			}
+// 		}
+// 	}
+// }
 
 read_period_value :: proc(gb: ^GB, nrx3: byte, nrx4: byte) -> u16 {
 	return (u16(nrx4 & 0x07) << 8) | u16(nrx3)

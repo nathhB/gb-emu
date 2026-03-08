@@ -123,7 +123,8 @@ write_to_div :: proc(gb: ^GB) {
 	// https://gbdev.io/pandocs/Audio_details.html#div-apu
 	// resetting DIV while bit 4 is set triggers DIV-APU
 	if (div & 0x10) > 0 {
-		apu_div_timer(gb)
+		panic("disable for now")
+		// apu_div_timer(gb)
 	}
 
 	gb.mem.write(gb, u16(GB_HardRegister.DIV), 0) // writing to DIV resets it
