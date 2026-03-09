@@ -17,14 +17,16 @@ Audio_Chunk_Size :: 512
 Audio_Buffer_Size :: Audio_Chunk_Size * 16
 
 APU :: struct {
-	enabled:      bool,
-	channel2:     APU_Channel2,
-	dacs:         [4]APU_DAC,
-	audio_stream: rl.AudioStream,
-	env_timer:    u8,
+	enabled:             bool,
+	channel2:            APU_Channel2,
+	dacs:                [4]APU_DAC,
+	audio_stream:        rl.AudioStream,
+	env_timer:           u8,
+	left_master_volume:  f32, // 0 - 1
+	right_master_volume: f32, // 0 - 1
 }
 
-audio_buffer: [Audio_Buffer_Size]i16
+audio_buffer: [Audio_Buffer_Size][2]i16
 audio_buffer_write_index: int
 audio_buffer_read_index: int
 
@@ -48,6 +50,8 @@ APU_Channel2 :: struct {
 	current_wave_value: f32,
 	env_sweep_timer:    u8,
 	trigger_time:       f64,
+	left_panning:       f32, // 0 / 1
+	right_panning:      f32, // 0 / 1
 }
 
 APU_DAC :: struct {
@@ -83,21 +87,24 @@ audio_callback :: proc(buffer_ptr: rawptr, frames: c.uint) {
 	// )
 
 	for i := 0; i < frames; i += 1 {
-		frame_value: i16 = 0
+		left_value: i16 = 0
+		right_value: i16 = 0
 
 		if i < available_frames {
-			frame_value = audio_buffer[audio_buffer_read_index]
+			left_value = audio_buffer[audio_buffer_read_index][0]
+			right_value = audio_buffer[audio_buffer_read_index][1]
 			audio_buffer_read_index = (audio_buffer_read_index + 1) % len(audio_buffer)
 		}
 
-		libc.memcpy(intrinsics.ptr_offset(buffer, i), &frame_value, 2)
+		libc.memcpy(intrinsics.ptr_offset(buffer, i * 2), &left_value, 2)
+		libc.memcpy(intrinsics.ptr_offset(buffer, i * 2 + 1), &right_value, 2)
 	}
 }
 
 apu_init :: proc(apu: ^APU) {
 	rl.InitAudioDevice()
 	rl.SetAudioStreamBufferSizeDefault(Audio_Chunk_Size)
-	apu.audio_stream = rl.LoadAudioStream(Audio_Sample_Rate, Audio_Sample_Size, 1)
+	apu.audio_stream = rl.LoadAudioStream(Audio_Sample_Rate, Audio_Sample_Size, 2)
 	rl.SetAudioStreamCallback(apu.audio_stream, rl.AudioCallback(audio_callback))
 	rl.PlayAudioStream(apu.audio_stream)
 
@@ -111,6 +118,14 @@ apu_deinit :: proc(apu: ^APU) {
 apu_write_register :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 	if reg == .NR52 {
 		write_to_master_control(gb, byte)
+	} else if reg == .NR51 {
+		// log.debugf("Writing to sound panning %w register: 0x%x", reg, byte)
+
+		write_to_panning(gb, byte)
+	} else if reg == .NR50 {
+		log.debugf("Writing to master volume %w register: 0x%x", reg, byte)
+
+		write_to_master_volume(gb, byte)
 	} else if reg >= .NR21 && reg <= .NR24 {
 		log.debugf("Writing to APU channel 2's %w register: 0x%x", reg, byte)
 		write_to_channel2(gb, reg, byte)
@@ -143,6 +158,14 @@ apu_div_timer :: proc(gb: ^GB) {
 	// }
 }
 
+clear_audio_registers :: proc(gb: ^GB) {
+	for reg in GB_Audio_Registers {
+		if reg != .NR52 {
+			gb.mem.write(gb, u16(reg), 0)
+		}
+	}
+}
+
 write_to_master_control :: proc(gb: ^GB, byte: u8) {
 	gb.apu.enabled = byte & 0x80 > 0
 	nr52 := read_audio_register(gb, GB_Audio_Registers.NR52)
@@ -159,12 +182,29 @@ write_to_master_control :: proc(gb: ^GB, byte: u8) {
 	}
 }
 
-clear_audio_registers :: proc(gb: ^GB) {
-	for reg in GB_Audio_Registers {
-		if reg != .NR52 {
-			gb.mem.write(gb, u16(reg), 0)
-		}
+write_to_master_volume :: proc(gb: ^GB, byte: u8) {
+	apu := &gb.apu
+
+	right_volume := byte & 0x7
+	left_volume := (byte & 0x70) >> 4
+
+	if right_volume == 0 {
+		right_volume = 1
 	}
+
+	if left_volume == 0 {
+		left_volume = 1
+	}
+
+	apu.left_master_volume = f32(left_volume) / 0x7
+	apu.right_master_volume = f32(right_volume) / 0x7
+}
+
+write_to_panning :: proc(gb: ^GB, byte: u8) {
+	apu := &gb.apu
+
+	apu.channel2.right_panning = byte & 0x2 > 0 ? 1 : 0
+	apu.channel2.left_panning = byte & 0x20 > 0 ? 1 : 0
 }
 
 write_to_channel2 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
@@ -270,6 +310,7 @@ report_channel_status :: proc(gb: ^GB, channel_id: u8, enabled: bool) {
 }
 
 channel2_tick :: proc(gb: ^GB) {
+	apu := &gb.apu
 	channel := &gb.apu.channel2
 
 	channel.apu_dots += 1
@@ -312,8 +353,12 @@ channel2_tick :: proc(gb: ^GB) {
 	// Sample at 44100 Hz
 	if channel.sample_tick >= Pulse_Sample_Ticks {
 		frame_value := channel.acc_frame_value / f32(channel.sample_tick)
+		left_panning := channel.left_panning * apu.left_master_volume
+		right_panning := channel.right_panning * apu.right_master_volume
+		left_value := frame_value * left_panning * volume_level
+		right_value := frame_value * right_panning * volume_level
 
-		write_frame_to_audio_buffer(&gb.apu, frame_value * volume_level)
+		write_to_audio_buffer(&gb.apu, left_value, right_value)
 		channel.sample_tick = 0
 		channel.acc_frame_value = 0
 	}
@@ -352,38 +397,6 @@ channel2_div_tick :: proc(gb: ^GB) {
 	}
 }
 
-// channel2_div_tick :: proc(gb: ^GB) {
-// 	channel := &gb.apu.channel2
-//
-// 	channel.div_tick = (channel.div_tick + 1) % 8
-//
-// 	if channel.div_tick == 0 {
-// 		// envelope update
-// 		if channel.sweep_pace > 0 {
-// 			channel.env_timer = (channel.env_timer + 1) % channel.sweep_pace
-//
-// 			if channel.env_timer == 0 {
-// 				if channel.env_dir == 0 {
-// 					channel.volume -= 1
-// 				} else {
-// 					channel.volume += 1
-// 				}
-// 			}
-// 		}
-// 	} else if channel.div_tick == 2 {
-// 		// expire update
-// 		if channel.expire_enabled {
-// 			channel.expire_timer += 1
-//
-// 			if channel.expire_timer >= 64 {
-// 				channel.enabled = false
-// 				report_channel_status(gb, 1, false)
-// 				log.debug("Channel 2 expired")
-// 			}
-// 		}
-// 	}
-// }
-
 read_period_value :: proc(gb: ^GB, nrx3: byte, nrx4: byte) -> u16 {
 	return (u16(nrx4 & 0x07) << 8) | u16(nrx3)
 }
@@ -417,9 +430,10 @@ get_pulse_wave_value :: proc(wave_duty: u8, frame: int) -> f32 {
 	fmt.panicf("unspported wave duty: %d", wave_duty)
 }
 
-write_frame_to_audio_buffer :: proc(apu: ^APU, frame_value: f32) {
+write_to_audio_buffer :: proc(apu: ^APU, left_value, right_value: f32) {
 	// frame_value is [-1.0, +1.0]
 
-	audio_buffer[audio_buffer_write_index] = i16(frame_value * f32(32_767))
+	audio_buffer[audio_buffer_write_index][0] = i16(left_value * f32(32_767))
+	audio_buffer[audio_buffer_write_index][1] = i16(right_value * f32(32_767))
 	audio_buffer_write_index = (audio_buffer_write_index + 1) % len(audio_buffer)
 }
