@@ -93,9 +93,9 @@ GB_Audio_Registers :: enum u16 {
 	NR33 = 0xFF1D, // Channel 3 period low [write-only]
 	NR34 = 0xFF1E, // Channel 3 period high & control
 	NR41 = 0xFF20, // Channel 4 length timer [write-only]
-	NR42 = 0xFF21, // Channel 4 output level             
-	NR43 = 0xFF22, // Channel 4 period low [write-only]  
-	NR44 = 0xFF23, // Channel 4 period high & control    
+	NR42 = 0xFF21, // Channel 4 output level
+	NR43 = 0xFF22, // Channel 4 period low [write-only]
+	NR44 = 0xFF23, // Channel 4 period high & control
 	NR50 = 0xFF24, // Master volume & VIN panning
 	NR51 = 0xFF25, // Sound panning
 	NR52 = 0xFF26, // Audio master control
@@ -136,6 +136,8 @@ gb_run :: proc(gb: ^GB) {
 		} else {
 			process_debugger_inputs(&gb.cpu)
 		}
+
+		apu_update_audio_stream(&gb.apu)
 
 		rl.UpdateTexture(screen_texture.texture, raw_data(gb.ppu.framebuffer[:]))
 
@@ -218,11 +220,11 @@ gb_load_rom :: proc(gb: ^GB, path: string) -> GB_Error {
 		log.info("No memory controller")
 	case 0x1:
 		mbc1_init(&gb.mem, rom, header.ram_size)
-		copy(gb.mem.data[0x100:], rom[0x100:0x4000]) // load the first 16kb bank 
+		copy(gb.mem.data[0x100:], rom[0x100:0x4000]) // load the first 16kb bank
 		log.info("Using MBC1 memory controller")
 	case 0x3:
 		mbc1_init(&gb.mem, rom, header.ram_size)
-		copy(gb.mem.data[0x100:], rom[0x100:0x4000]) // load the first 16kb bank 
+		copy(gb.mem.data[0x100:], rom[0x100:0x4000]) // load the first 16kb bank
 		log.info("Using MBC1 memory controller")
 	case:
 		return GB_Error.ROM_Unsupported
