@@ -232,8 +232,8 @@ draw_pixels_on_update :: proc(gb: ^GB, tick: u64) {
 }
 
 get_pixel_color_at :: proc(ppu: ^PPU, mem: ^GB_Memory, x: int, y: int) -> rl.Color {
-	scx := int(mem.read(mem, u16(GB_HardRegister.SCX)))
-	scy := int(mem.read(mem, u16(GB_HardRegister.SCY)))
+	scx := int(mem_read(mem, u16(GB_HardRegister.SCX)))
+	scy := int(mem_read(mem, u16(GB_HardRegister.SCY)))
 	tilemap_x := (scx + x) % 256
 	tilemap_y := (scy + y) % 256
 	bg_tile_id := get_bg_tile_id(mem, tilemap_x, tilemap_y)
@@ -330,7 +330,7 @@ get_bg_tile_id :: proc(mem: ^GB_Memory, x: int, y: int) -> u8 {
 	tile_y := y / 8
 	tilemap_offset := (tile_y * 32) + tile_x
 
-	return mem.read(mem, bg_tilemap_addr + u16(tilemap_offset))
+	return mem_read(mem, bg_tilemap_addr + u16(tilemap_offset))
 }
 
 get_objects_at_x :: proc(ppu: ^PPU, x: int, res: ^[dynamic]PPU_Object) {
@@ -376,8 +376,8 @@ get_pixel_color :: proc(
 
 	x_mask := u8(1 << (7 - u8(x_in_tile)))
 	y_offset := u16(y_in_tile * 2)
-	tile_data_low := mem.read(mem, tile_addr + y_offset)
-	tile_data_high := mem.read(mem, tile_addr + y_offset + 1)
+	tile_data_low := mem_read(mem, tile_addr + y_offset)
+	tile_data_high := mem_read(mem, tile_addr + y_offset + 1)
 	color_low := (tile_data_low & x_mask) > 0 ? 1 : 0
 	color_high := (tile_data_high & x_mask) > 0 ? 1 : 0
 	color_id := u8(color_high << 1) | u8(color_low)
@@ -499,7 +499,7 @@ scan_oam :: proc(ppu: ^PPU, mem: ^GB_Memory) {
 get_control_flag :: proc(mem: ^GB_Memory, flag: PPU_Control) -> bool {
 	mask := u8(1 << u8(flag))
 
-	return (mem.read(mem, u16(GB_HardRegister.LCDC)) & mask) > 0
+	return (mem_read(mem, u16(GB_HardRegister.LCDC)) & mask) > 0
 }
 
 create_state :: proc(

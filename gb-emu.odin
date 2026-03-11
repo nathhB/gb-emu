@@ -1,22 +1,35 @@
 package gb_emu
 
+import "core:flags"
 import "core:log"
 import "core:os"
 import rl "vendor:raylib"
 
+Command_Line_Options :: struct {
+	rom:   string,
+	color: bool,
+}
+
 main :: proc() {
 	context.logger = log.create_console_logger()
+
+	opts := Command_Line_Options{}
+	opts_err := flags.parse(&opts, os.args[1:])
+
+	if opts_err != nil {
+		log.debugf("Invalid command line arguments: %s", opts_err.(flags.Parse_Error).message)
+		return
+	}
+
 	gb := GB{}
 
-	gb_init(&gb)
+	gb_init(&gb, opts.color)
 	defer gb_deinit(&gb)
 
-	rom_path := "ROMS/zelda.gb"
-
-	err := gb_load_rom(&gb, rom_path)
+	err := gb_load_rom(&gb, opts.rom)
 
 	if err != GB_Error.None {
-		log.errorf("Failed to load boot ROM: %w", err)
+		log.errorf("Failed to load ROM %w: %w", opts.rom, err)
 
 		os.exit(1)
 	}

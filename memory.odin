@@ -3,11 +3,16 @@ package gb_emu
 import "core:log"
 import rl "vendor:raylib"
 
+VRAM_Bank_Size :: 0x2000
+VRAM_Size :: VRAM_Bank_Size * 2
+
 GB_Memory :: struct {
 	data:         [0xFFFF + 1]u8,
 	rom:          []u8,
+	vram:         [VRAM_Size]u8,
 	rom_bank:     int,
 	ram_bank:     int,
+	vram_bank:    int,
 	external_ram: bool,
 	read:         proc(mem: ^GB_Memory, addr: u16) -> u8,
 	write:        proc(gb: ^GB, addr: u16, byte: u8),
@@ -20,23 +25,32 @@ GB_Memory :: struct {
 }
 
 mem_write :: proc(gb: ^GB, addr: u16, byte: u8) {
-	if addr >= 0xFF00 {
+	if addr >= 0x8000 && addr <= 0x9FFF {
+		// VRAM, write to current bank
+		vram_addr := get_vram_addr(&gb.mem, addr)
+
+		gb.mem.vram[vram_addr] = byte
+	} else if addr >= 0xFF00 {
 		write_to_hardware_register(gb, addr, byte)
-
-		return
+	} else {
+		gb.mem.write(gb, addr, byte)
 	}
-
-	gb.mem.write(gb, addr, byte)
 }
 
 mem_read :: proc(mem: ^GB_Memory, addr: u16) -> u8 {
-	if addr == 0xFF00 {
-		byte := mem.read(mem, addr)
+	if addr == u16(GB_HardRegister.VBK) {
+		// pandocs: Reading from this register will return the number of the
+		// currently loaded VRAM bank in bit 0, and all other bits will be set to 1
 
-		return byte
-	} else {
-		return mem.read(mem, addr)
+		return mem.vram_bank == 1 ? 0xFF : 0xFE
+	} else if addr >= 0x8000 && addr <= 0x9FFF {
+		// VRAM, read from current bank
+		vram_addr := get_vram_addr(mem, addr)
+
+		return mem.vram[vram_addr]
 	}
+
+	return mem.read(mem, addr)
 }
 
 mem_get_ptr :: proc(mem: ^GB_Memory, addr: u16) -> ^u8 {
@@ -49,6 +63,12 @@ mem_tick :: proc(gb: ^GB) {
 	}
 }
 
+get_vram_addr :: proc(mem: ^GB_Memory, addr: u16) -> u16 {
+	bank_offset := u16(mem.vram_bank * VRAM_Bank_Size)
+
+	return bank_offset + (addr - 0x8000)
+}
+
 // https://gbdev.io/pandocs/Hardware_Reg_List.html
 write_to_hardware_register :: proc(gb: ^GB, addr: u16, byte: u8) {
 	if is_audio_register(addr) {
@@ -58,14 +78,16 @@ write_to_hardware_register :: proc(gb: ^GB, addr: u16, byte: u8) {
 
 	reg := GB_HardRegister(addr)
 
-	if reg == GB_HardRegister.JOYPAD {
+	if reg == .JOYPAD {
 		write_to_joypad(gb, byte)
-	} else if reg == GB_HardRegister.DIV {
+	} else if reg == .DIV {
 		write_to_div(gb)
-	} else if reg == GB_HardRegister.DMA {
+	} else if reg == .DMA {
 		start_dma_transfer(&gb.mem, byte)
-	} else if reg == GB_HardRegister.STAT {
+	} else if reg == .STAT {
 		gb.mem.write(gb, addr, byte & 0x78)
+	} else if reg == .VBK {
+		write_to_vbk(&gb.mem, byte)
 	} else {
 		gb.mem.write(gb, addr, byte)
 	}
@@ -128,6 +150,10 @@ write_to_div :: proc(gb: ^GB) {
 	}
 
 	gb.mem.write(gb, u16(GB_HardRegister.DIV), 0) // writing to DIV resets it
+}
+
+write_to_vbk :: proc(mem: ^GB_Memory, byte: u8) {
+	mem.vram_bank = int(byte & 0x1)
 }
 
 // https://gbdev.io/pandocs/OAM_DMA_Transfer.html#ff46--dma-oam-dma-source-address--start

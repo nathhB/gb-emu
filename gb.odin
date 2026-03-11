@@ -1,14 +1,12 @@
 package gb_emu
 
+import "core:flags"
 import "core:log"
 import "core:mem"
 import "core:os"
-import "core:time"
 import rl "vendor:raylib"
 
-DotNs: u64 = 238 // 1 dot = 2^22 Hz, 1 dot = 1 T-Cycle, 1 M-Cycle = 4 T-Cycle
 FrameDots: u64 = ScanelineDots * FrameScanlines
-FrameNs: u64 = FrameDots * DotNs
 ScreenWidth :: 160
 ScreenHeight :: 144
 BootRomPath :: "ROMS/dmg_boot.gb"
@@ -25,6 +23,7 @@ GB :: struct {
 	timer_dots:    u64,
 	speed:         int,
 	inputs:        Input_State,
+	color:         bool,
 }
 
 Input_State :: struct {
@@ -74,6 +73,7 @@ GB_HardRegister :: enum u16 {
 	TAC    = 0xFF07,
 	WY     = 0xFF4A,
 	WX     = 0xFF4B,
+	VBK    = 0xFF4F,
 	DMA    = 0xFF46,
 }
 
@@ -101,12 +101,17 @@ GB_Audio_Registers :: enum u16 {
 	NR52 = 0xFF26, // Audio master control
 }
 
-gb_init :: proc(gb: ^GB) {
+gb_init :: proc(gb: ^GB, color: bool) {
 	cpu_init(&gb.cpu)
 	ppu_init(&gb.ppu, &gb.mem)
 	apu_init(&gb.apu)
 
 	gb.mem.data[GB_HardRegister.JOYPAD] = 0xFF
+	gb.color = color
+
+	if color {
+		log.debug("CGB mode enabled")
+	}
 }
 
 gb_deinit :: proc(gb: ^GB) {
