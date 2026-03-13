@@ -3,33 +3,61 @@ package gb_emu
 import "core:log"
 import rl "vendor:raylib"
 
-VRAM_Bank_Size :: 0x2000
+VRAM_Bank_Size :: 0x2000 + 1
 VRAM_Size :: VRAM_Bank_Size * 2
+WRAM_Bank_Size :: 0xFFF + 1
+WRAM_Size :: WRAM_Bank_Size * 7
 
 GB_Memory :: struct {
-	data:         [0xFFFF + 1]u8,
-	rom:          []u8,
-	vram:         [VRAM_Size]u8,
-	rom_bank:     int,
-	ram_bank:     int,
-	vram_bank:    int,
-	external_ram: bool,
-	read:         proc(mem: ^GB_Memory, addr: u16) -> u8,
-	write:        proc(gb: ^GB, addr: u16, byte: u8),
-	get_ptr:      proc(mem: ^GB_Memory, addr: u16) -> ^u8,
-	oam_transfer: struct {
+	vram_banking:  bool, // CGB
+	wram_banking:  bool, // CGB
+	data:          [0xFFFF + 1]u8,
+	rom:           []u8,
+	vram:          [VRAM_Size]u8,
+	wram:          [WRAM_Size]u8,
+	rom_bank:      int,
+	ram_bank:      int,
+	vram_bank:     int,
+	wram_bank:     int,
+	external_ram:  bool,
+	read:          proc(mem: ^GB_Memory, addr: u16) -> u8,
+	write:         proc(gb: ^GB, addr: u16, byte: u8),
+	get_ptr:       proc(mem: ^GB_Memory, addr: u16) -> ^u8,
+	oam_transfer:  struct {
 		active:   bool,
 		src_addr: u16,
 		current:  u8,
 	},
+	hdma_transfer: struct {
+		active:  bool,
+		mode:    HDMA_Mode,
+		length:  int,
+		current: int,
+	},
+}
+
+HDMA_Mode :: enum {
+	General_Purpose,
+	HBlank,
 }
 
 mem_write :: proc(gb: ^GB, addr: u16, byte: u8) {
 	if addr >= 0x8000 && addr <= 0x9FFF {
-		// VRAM, write to current bank
-		vram_addr := get_vram_addr(&gb.mem, addr)
+		if gb.mem.vram_banking {
+			vram_addr := get_vram_addr(&gb.mem, addr)
 
-		gb.mem.vram[vram_addr] = byte
+			gb.mem.vram[vram_addr] = byte
+		} else {
+			gb.mem.write(gb, addr, byte)
+		}
+	} else if addr >= 0xD000 && addr <= 0xDFFF {
+		if gb.mem.wram_banking {
+			wram_addr := get_wram_addr(&gb.mem, addr)
+
+			gb.mem.wram[wram_addr] = byte
+		} else {
+			gb.mem.write(gb, addr, byte)
+		}
 	} else if addr >= 0xFF00 {
 		write_to_hardware_register(gb, addr, byte)
 	} else {
@@ -44,10 +72,17 @@ mem_read :: proc(mem: ^GB_Memory, addr: u16) -> u8 {
 
 		return mem.vram_bank == 1 ? 0xFF : 0xFE
 	} else if addr >= 0x8000 && addr <= 0x9FFF {
-		// VRAM, read from current bank
-		vram_addr := get_vram_addr(mem, addr)
+		if mem.vram_banking {
+			vram_addr := get_vram_addr(mem, addr)
 
-		return mem.vram[vram_addr]
+			return mem.vram[vram_addr]
+		}
+	} else if addr >= 0xD000 && addr <= 0xDFFF {
+		if mem.wram_banking {
+			wram_addr := get_wram_addr(mem, addr)
+
+			return mem.wram[wram_addr]
+		}
 	}
 
 	return mem.read(mem, addr)
@@ -69,6 +104,15 @@ get_vram_addr :: proc(mem: ^GB_Memory, addr: u16) -> u16 {
 	return bank_offset + (addr - 0x8000)
 }
 
+get_wram_addr :: proc(mem: ^GB_Memory, addr: u16) -> u16 {
+	assert(mem.wram_bank > 0)
+
+	bank := mem.wram_bank - 1
+	bank_offset := u16(bank * WRAM_Bank_Size)
+
+	return bank_offset + (addr - 0xD000)
+}
+
 // https://gbdev.io/pandocs/Hardware_Reg_List.html
 write_to_hardware_register :: proc(gb: ^GB, addr: u16, byte: u8) {
 	if is_audio_register(addr) {
@@ -88,6 +132,10 @@ write_to_hardware_register :: proc(gb: ^GB, addr: u16, byte: u8) {
 		gb.mem.write(gb, addr, byte & 0x78)
 	} else if reg == .VBK {
 		write_to_vbk(&gb.mem, byte)
+	} else if reg == .WBK {
+		write_to_wbk(&gb.mem, byte)
+	} else if reg == .HDMA5 {
+		start_hdma_transfer(&gb.mem, byte)
 	} else {
 		gb.mem.write(gb, addr, byte)
 	}
@@ -156,6 +204,10 @@ write_to_vbk :: proc(mem: ^GB_Memory, byte: u8) {
 	mem.vram_bank = int(byte & 0x1)
 }
 
+write_to_wbk :: proc(mem: ^GB_Memory, byte: u8) {
+	mem.wram_bank = max(1, int(byte & 0b00000111))
+}
+
 // https://gbdev.io/pandocs/OAM_DMA_Transfer.html#ff46--dma-oam-dma-source-address--start
 start_dma_transfer :: proc(mem: ^GB_Memory, byte: u8) {
 	// Source:      $XX00-$XX9F   ;XX = $00 to $DF
@@ -164,6 +216,17 @@ start_dma_transfer :: proc(mem: ^GB_Memory, byte: u8) {
 	mem.oam_transfer.active = true
 	mem.oam_transfer.src_addr = u16(byte) * 0x100
 	mem.oam_transfer.current = 0
+}
+
+// https://gbdev.io/pandocs/CGB_Registers.html#ff55--hdma5-cgb-mode-only-vram-dma-lengthmodestart
+start_hdma_transfer :: proc(mem: ^GB_Memory, byte: u8) {
+	mode := byte & 0x80 > 0 ? HDMA_Mode.HBlank : HDMA_Mode.General_Purpose
+	length := (int(byte & 0x7F) + 1) * 0x10
+
+	mem.hdma_transfer.active = true
+	mem.hdma_transfer.mode = mode
+	mem.hdma_transfer.length = length
+	mem.hdma_transfer.current = 0
 }
 
 do_oam_transfer :: proc(gb: ^GB) {

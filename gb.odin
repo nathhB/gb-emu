@@ -74,7 +74,13 @@ GB_HardRegister :: enum u16 {
 	WY     = 0xFF4A,
 	WX     = 0xFF4B,
 	VBK    = 0xFF4F,
+	WBK    = 0xFF70,
 	DMA    = 0xFF46,
+	HDMA1  = 0xFF51,
+	HDMA2  = 0xFF52,
+	HDMA3  = 0xFF53,
+	HDMA4  = 0xFF54,
+	HDMA5  = 0xFF55,
 }
 
 GB_Audio_Registers :: enum u16 {
@@ -107,10 +113,14 @@ gb_init :: proc(gb: ^GB, color: bool) {
 	apu_init(&gb.apu)
 
 	gb.mem.data[GB_HardRegister.JOYPAD] = 0xFF
+
 	gb.color = color
 
 	if color {
 		log.debug("CGB mode enabled")
+
+		gb.mem.vram_banking = true
+		gb.mem.wram_banking = true
 	}
 }
 
@@ -263,7 +273,12 @@ unload_boot_rom :: proc(gb: ^GB) {
 do_frame :: proc(gb: ^GB) {
 	for f := 0; f < gb.speed; f += 1 {
 		for t: u64 = 0; t < FrameDots; t += 1 {
-			cpu_tick(gb)
+			if gb.mem.hdma_transfer.active && gb.mem.hdma_transfer.mode == .General_Purpose {
+				// general purpose HDMA halts the CPU while active
+				// TODO:
+			} else {
+				cpu_tick(gb)
+			}
 
 			if gb.cpu.breakpoint > 0 {
 				return
