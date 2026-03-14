@@ -242,6 +242,7 @@ write_to_master_control :: proc(gb: ^GB, byte: u8) {
 		log.debug("APU disabled")
 		clear_audio_registers(gb)
 		report_channel_status(gb, 1, false)
+		report_channel_status(gb, 2, false)
 		// TODO: do that for all 4 channels
 	}
 }
@@ -308,6 +309,7 @@ write_to_channel1 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 		} else if dac.enabled && !dac_enabled {
 			log.debug("DAC 1 disabled, disabling channel 2")
 			channel.enabled = false
+			channel.acc_frame_value = 0
 			report_channel_status(gb, 1, false)
 		}
 
@@ -407,7 +409,8 @@ write_to_channel2 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 		} else if dac.enabled && !dac_enabled {
 			log.debug("DAC 2 disabled, disabling channel 2")
 			channel.enabled = false
-			report_channel_status(gb, 1, false)
+			channel.acc_frame_value = 0
+			report_channel_status(gb, 2, false)
 		}
 
 		dac.enabled = dac_enabled
@@ -441,7 +444,7 @@ write_to_channel2 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 			channel.env_sweep_timer = channel.sweep_pace == 0 ? 8 : channel.sweep_pace
 			channel.env_enabled = channel.sweep_pace > 0
 
-			report_channel_status(gb, 1, true)
+			report_channel_status(gb, 2, true)
 		}
 
 		channel.expire_enabled = byte & 0x40 > 0
@@ -568,6 +571,7 @@ channel1_expire_tick :: proc(gb: ^GB) {
 			log.debug("Channel 1 expired")
 
 			channel.enabled = false
+			channel.acc_frame_value = 0
 			report_channel_status(gb, 1, false)
 		}
 	}
@@ -605,7 +609,8 @@ channel2_expire_tick :: proc(gb: ^GB) {
 			log.debug("Channel 2 expired")
 
 			channel.enabled = false
-			report_channel_status(gb, 1, false)
+			channel.acc_frame_value = 0
+			report_channel_status(gb, 2, false)
 		}
 	}
 }
