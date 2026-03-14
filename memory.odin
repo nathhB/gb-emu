@@ -29,16 +29,29 @@ GB_Memory :: struct {
 		current:  u8,
 	},
 	hdma_transfer: struct {
-		active:  bool,
-		mode:    HDMA_Mode,
-		length:  int,
-		current: int,
+		mode:      HDMA_Mode,
+		blocks:    u8,
+		current:   u8,
+		src_addr:  u16,
+		dest_addr: u16,
+		status:    u8, // returned when register HDMA5 (FF55) is read
 	},
 }
 
 HDMA_Mode :: enum {
 	General_Purpose,
 	HBlank,
+}
+
+mem_init :: proc(mem: ^GB_Memory, color: bool) {
+	mem.data[GB_HardRegister.JOYPAD] = 0xFF
+
+	if color {
+		mem.vram_banking = true
+		mem.wram_banking = true
+	}
+
+	mem.hdma_transfer.status = 0xFF
 }
 
 mem_write :: proc(gb: ^GB, addr: u16, byte: u8) {
@@ -71,6 +84,8 @@ mem_read :: proc(mem: ^GB_Memory, addr: u16) -> u8 {
 		// currently loaded VRAM bank in bit 0, and all other bits will be set to 1
 
 		return mem.vram_bank == 1 ? 0xFF : 0xFE
+	} else if addr == u16(GB_HardRegister.HDMA5) {
+		return mem.hdma_transfer.status
 	} else if addr >= 0x8000 && addr <= 0x9FFF {
 		if mem.vram_banking {
 			vram_addr := get_vram_addr(mem, addr)
@@ -135,7 +150,7 @@ write_to_hardware_register :: proc(gb: ^GB, addr: u16, byte: u8) {
 	} else if reg == .WBK {
 		write_to_wbk(&gb.mem, byte)
 	} else if reg == .HDMA5 {
-		start_hdma_transfer(&gb.mem, byte)
+		write_to_hdma_transfer(&gb.mem, byte)
 	} else {
 		gb.mem.write(gb, addr, byte)
 	}
@@ -219,13 +234,25 @@ start_dma_transfer :: proc(mem: ^GB_Memory, byte: u8) {
 }
 
 // https://gbdev.io/pandocs/CGB_Registers.html#ff55--hdma5-cgb-mode-only-vram-dma-lengthmodestart
-start_hdma_transfer :: proc(mem: ^GB_Memory, byte: u8) {
-	mode := byte & 0x80 > 0 ? HDMA_Mode.HBlank : HDMA_Mode.General_Purpose
-	length := (int(byte & 0x7F) + 1) * 0x10
+write_to_hdma_transfer :: proc(mem: ^GB_Memory, byte: u8) {
+	if hdma_transfer_is_active(mem) && (byte & (1 << 7)) == 0 {
+		// stop HDMA transfer
+		mem.hdma_transfer.status |= 1 << 7
+		return
+	}
 
-	mem.hdma_transfer.active = true
+	mode := byte & 0x80 > 0 ? HDMA_Mode.HBlank : HDMA_Mode.General_Purpose
+	blocks := (byte & 0x7F) + 1
+	src_addr_hi := u16(mem_read(mem, u16(GB_HardRegister.HDMA1)))
+	src_addr_lo := u16(mem_read(mem, u16(GB_HardRegister.HDMA2)) & 0xF0)
+	dest_addr_hi := u16(mem_read(mem, u16(GB_HardRegister.HDMA3)) & 0b00011111)
+	dest_addr_lo := u16(mem_read(mem, u16(GB_HardRegister.HDMA4)) & 0xF0)
+
+	mem.hdma_transfer.src_addr = src_addr_hi << 8 | src_addr_lo
+	mem.hdma_transfer.dest_addr = 0x8000 + (dest_addr_hi << 8 | dest_addr_lo)
+	mem.hdma_transfer.status = 0
 	mem.hdma_transfer.mode = mode
-	mem.hdma_transfer.length = length
+	mem.hdma_transfer.blocks = blocks
 	mem.hdma_transfer.current = 0
 }
 
@@ -240,4 +267,29 @@ do_oam_transfer :: proc(gb: ^GB) {
 	if mem.oam_transfer.current == 160 {
 		mem.oam_transfer.active = false
 	}
+}
+
+hdma_copy_one_block :: proc(gb: ^GB) {
+	transfer := &gb.mem.hdma_transfer
+
+	ensure(hdma_transfer_is_active(&gb.mem))
+
+	from := transfer.src_addr + u16(transfer.current * 0x10)
+	to := transfer.dest_addr + u16(transfer.current * 0x10)
+
+	for i: u16 = 0; i < 0x10; i += 1 {
+		mem_write(gb, to + i, mem_read(&gb.mem, from + i))
+	}
+
+	transfer.current += 1
+	remaining := transfer.blocks - transfer.current
+	transfer.status = remaining & 0x7F
+
+	if remaining == 0 {
+		transfer.status |= 1 << 7
+	}
+}
+
+hdma_transfer_is_active :: proc(mem: ^GB_Memory) -> bool {
+	return (mem.hdma_transfer.status & (1 << 7)) == 0
 }

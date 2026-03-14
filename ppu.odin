@@ -89,9 +89,9 @@ ppu_init :: proc(ppu: ^PPU, mem: ^GB_Memory) {
 
 	vblank_duration := VBlank_ScanelineCount * ScanelineDots
 
-	ppu.states[PPU_Mode.HBlank] = create_state(nil, nil, 204, PPU_Mode.OAM_Scan)
+	ppu.states[PPU_Mode.HBlank] = create_state(hblank_on_enter, nil, 204, PPU_Mode.OAM_Scan)
 	ppu.states[PPU_Mode.VBlank] = create_state(
-		vlank_on_enter,
+		vblank_on_enter,
 		nil,
 		vblank_duration,
 		PPU_Mode.OAM_Scan,
@@ -208,7 +208,13 @@ oam_scan_on_enter :: proc(gb: ^GB) {
 	scan_oam(&gb.ppu, &gb.mem)
 }
 
-vlank_on_enter :: proc(gb: ^GB) {
+hblank_on_enter :: proc(gb: ^GB) {
+	if hdma_transfer_is_active(&gb.mem) && gb.mem.hdma_transfer.mode == .HBlank {
+		hdma_copy_one_block(gb)
+	}
+}
+
+vblank_on_enter :: proc(gb: ^GB) {
 	assert(gb.ppu.mode == PPU_Mode.VBlank)
 	cpu_request_interrupt(gb, Interrupt.VBlank)
 }

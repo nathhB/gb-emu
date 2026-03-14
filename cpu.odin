@@ -72,6 +72,11 @@ cpu_init :: proc(cpu: ^CPU) {
 }
 
 cpu_tick :: proc(gb: ^GB) {
+	if hdma_transfer_is_active(&gb.mem) && gb.mem.hdma_transfer.mode == .General_Purpose {
+		hdma_copy_one_block(gb)
+		return
+	}
+
 	switch gb.cpu.state {
 	case CPU_State.Fetch:
 		do_fetch_state(gb)
