@@ -27,9 +27,9 @@ PPU :: struct {
 	scanline_objects: sa.Small_Array(MaxObjectsPerScanline, PPU_Object),
 	states:           [4]PPU_State,
 	interrupt_line:   bool,
-	bg_palette:       PPU_Palette,
-	obj0_palette:     PPU_Palette,
-	obj1_palette:     PPU_Palette,
+	bg_colors:        DMG_Colors,
+	obp0_colors:      DMG_Colors,
+	obp1_colors:      DMG_Colors,
 }
 
 PPU_Mode :: enum {
@@ -75,7 +75,13 @@ PPU_Object :: struct {
 	attrs:   u8,
 }
 
-PPU_Palette :: [4]rl.Color
+DMG_Colors :: [4]rl.Color
+
+DMG_Palette :: enum {
+	BGP,
+	OBP0,
+	OBP1,
+}
 
 ppu_init :: proc(ppu: ^PPU, mem: ^GB_Memory, color: bool) {
 	ppu.color = color
@@ -104,14 +110,14 @@ ppu_init :: proc(ppu: ^PPU, mem: ^GB_Memory, color: bool) {
 		PPU_Mode.HBlank,
 	)
 
-	ppu.bg_palette = [4]rl.Color{rl.WHITE, rl.ORANGE, rl.RED, rl.BLACK}
-	ppu.obj0_palette = [4]rl.Color {
+	ppu.bg_colors = [4]rl.Color{rl.WHITE, rl.ORANGE, rl.RED, rl.BLACK}
+	ppu.obp0_colors = [4]rl.Color {
 		rl.Color{136, 192, 112, 255},
 		rl.Color{52, 104, 86, 255},
 		rl.Color{8, 24, 32, 255},
 		rl.Color{224, 248, 208, 255},
 	}
-	ppu.obj1_palette = [4]rl.Color {
+	ppu.obp1_colors = [4]rl.Color {
 		rl.Color{0, 170, 188, 255},
 		rl.Color{0, 110, 132, 255},
 		rl.Color{0, 68, 75, 255},
@@ -278,8 +284,7 @@ get_pixel_color_at :: proc(ppu: ^PPU, mem: ^GB_Memory, x: int, y: int) -> rl.Col
 		obj_pixel_color, drawn_obj = get_object_pixel_color(ppu, mem, objects[:], x, y)
 	}
 
-	output_pixel_color: u8
-	palette_addr: u16
+	draw_obj := false
 
 	if obj_pixel_color > 0 {
 		// priority == 1 means BG/Window color 1-3 (non-transparent) is drawn over this object
@@ -287,44 +292,57 @@ get_pixel_color_at :: proc(ppu: ^PPU, mem: ^GB_Memory, x: int, y: int) -> rl.Col
 		bg_priority := ppu.color && bg_win_enable_prio ? get_tile_priority(bg_tile_props) : 0
 		priority := bg_priority == 1 ? 1 : get_tile_priority(drawn_obj.attrs)
 
-		if priority == 1 && bg_pixel_color > 0 {
-			output_pixel_color = bg_pixel_color
-			palette_addr = BGP_Addr
+		if priority == 0 || bg_pixel_color == 0 {
+			draw_obj = true
+		}
+	}
+
+	if draw_obj {
+		if ppu.color {
+			// TODO:
+			unreachable()
 		} else {
-			output_pixel_color = obj_pixel_color
-			obj_palette := get_tile_dmg_palette(drawn_obj.attrs)
-			palette_addr = obj_palette == 0 ? OBP0_Addr : OBP1_Addr
+			palette_id := get_tile_dmg_palette(drawn_obj.attrs)
+			palette := palette_id == 0 ? DMG_Palette.OBP0 : DMG_Palette.OBP1
+
+			return get_color_from_dmg_palette(ppu, mem, palette, obj_pixel_color)
 		}
 	} else {
-		output_pixel_color = bg_pixel_color
-		palette_addr = BGP_Addr
+		if ppu.color {
+			// TODO:
+			unreachable()
+		} else {
+			return get_color_from_dmg_palette(ppu, mem, .BGP, bg_pixel_color)
+		}
 	}
-
-	return get_color_from_palette(ppu, mem, palette_addr, output_pixel_color)
 }
 
-get_color_from_palette :: proc(
+get_color_from_dmg_palette :: proc(
 	ppu: ^PPU,
 	mem: ^GB_Memory,
-	palette_addr: u16,
+	palette: DMG_Palette,
 	color_id: u8,
 ) -> rl.Color {
-	mask := u8(0x3) << (color_id * 2)
-	palette_data := mem_read(mem, BGP_Addr)
-	palette_color_id := (palette_data & mask) >> (color_id * 2)
-	palette: ^PPU_Palette
+	colors: ^DMG_Colors
+	palette_addr: u16
 
-	if palette_addr == BGP_Addr {
-		palette = &ppu.bg_palette
-	} else if palette_addr == OBP0_Addr {
-		palette = &ppu.obj0_palette
-	} else if palette_addr == OBP1_Addr {
-		palette = &ppu.obj1_palette
-	} else {
-		panic("unexpected palette address")
+	switch palette {
+	case DMG_Palette.BGP:
+		colors = &ppu.bg_colors
+		palette_addr = BGP_Addr
+	case DMG_Palette.OBP0:
+		colors = &ppu.obp0_colors
+		palette_addr = OBP0_Addr
+	case DMG_Palette.OBP1:
+		colors = &ppu.obp1_colors
+		palette_addr = OBP1_Addr
 	}
 
-	return palette[palette_color_id]
+	mask := u8(0x3) << (color_id * 2)
+	palette_data := mem_read(mem, palette_addr)
+	palette_color_id := (palette_data & mask) >> (color_id * 2)
+
+	return colors[palette_color_id]
 }
 
 get_bg_tile :: proc(mem: ^GB_Memory, x: int, y: int, color: bool) -> (id: u8, props: u8) {

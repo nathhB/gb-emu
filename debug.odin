@@ -188,7 +188,7 @@ update_tileset_texture :: proc(
 		for tile_x := 0; tile_x < 8; tile_x += 1 {
 			for tile_y := 0; tile_y < 8; tile_y += 1 {
 				pixel_color_id := get_pixel_color(ppu, mem, tile_addr, tile_x, tile_y)
-				pixel_color := get_color_from_palette(ppu, mem, BGP_Addr, pixel_color_id)
+				pixel_color := get_color_from_dmg_palette(ppu, mem, .BGP, pixel_color_id)
 				img_x := x + tile_x
 				img_y := y + tile_y
 
