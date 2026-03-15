@@ -20,6 +20,7 @@ OBP0_Addr :: 0xFF48
 OBP1_Addr :: 0xFF49
 
 PPU :: struct {
+	color:            bool,
 	scanline:         u8,
 	mode:             PPU_Mode,
 	framebuffer:      [ScreenWidth * ScreenHeight]rl.Color,
@@ -74,16 +75,10 @@ PPU_Object :: struct {
 	attrs:   u8,
 }
 
-PPU_Object_Attr :: enum {
-	Priority    = 7,
-	Y_Flip      = 6,
-	X_Flip      = 5,
-	DMG_Palette = 4,
-}
-
 PPU_Palette :: [4]rl.Color
 
-ppu_init :: proc(ppu: ^PPU, mem: ^GB_Memory) {
+ppu_init :: proc(ppu: ^PPU, mem: ^GB_Memory, color: bool) {
+	ppu.color = color
 	ppu.scanline = 0
 	ppu.mode = PPU_Mode.OAM_Scan
 
@@ -242,15 +237,37 @@ get_pixel_color_at :: proc(ppu: ^PPU, mem: ^GB_Memory, x: int, y: int) -> rl.Col
 	scy := int(mem_read(mem, u16(GB_HardRegister.SCY)))
 	tilemap_x := (scx + x) % 256
 	tilemap_y := (scy + y) % 256
-	bg_tile_id := get_bg_tile_id(mem, tilemap_x, tilemap_y)
+	bg_tile_id, bg_tile_props := get_bg_tile(mem, tilemap_x, tilemap_y, ppu.color)
 	bg_pixel_color: u8 = 0
 	obj_pixel_color: u8 = 0
 	drawn_obj: PPU_Object
 
-	// if LCDC.0 bit is 0, the background / window pixel color is white
-	if get_control_flag(mem, PPU_Control.BG_WindowEnablePrio) {
+	// in DMG mode, if LCDC.0 bit is 0, the background / window pixel color is white
+	// in CGB mode, if LCDC.0 bit is 0, background / window pixel never has priority over object pixels
+	bg_win_enable_prio := get_control_flag(mem, PPU_Control.BG_WindowEnablePrio)
+
+	if ppu.color || bg_win_enable_prio {
 		bg_tile_addr := get_tile_addr(mem, bg_tile_id, is_object = false)
-		bg_pixel_color = get_pixel_color(ppu, mem, bg_tile_addr, tilemap_x % 8, tilemap_y % 8)
+		x_flip := false
+		y_flip := false
+		bank := 0
+
+		if ppu.color {
+			x_flip = get_tile_x_flip(bg_tile_props)
+			y_flip = get_tile_y_flip(bg_tile_props)
+			bank = get_tile_bank(bg_tile_props)
+		}
+
+		bg_pixel_color = get_pixel_color(
+			ppu,
+			mem,
+			bg_tile_addr,
+			tilemap_x % 8,
+			tilemap_y % 8,
+			x_flip = x_flip,
+			y_flip = y_flip,
+			bank = bank,
+		)
 	}
 
 	if get_control_flag(mem, PPU_Control.OBJ_Enable) {
@@ -265,16 +282,18 @@ get_pixel_color_at :: proc(ppu: ^PPU, mem: ^GB_Memory, x: int, y: int) -> rl.Col
 	palette_addr: u16
 
 	if obj_pixel_color > 0 {
-		// priority == true means BG/Window color 1-3 (non-transparent) is drawn over this object
-		priority := get_object_attr(drawn_obj, PPU_Object_Attr.Priority)
+		// priority == 1 means BG/Window color 1-3 (non-transparent) is drawn over this object
+		// in CGB mode, background priority of 1 takes precedence over OAM priority
+		bg_priority := ppu.color && bg_win_enable_prio ? get_tile_priority(bg_tile_props) : 0
+		priority := bg_priority == 1 ? 1 : get_tile_priority(drawn_obj.attrs)
 
-		if priority && bg_pixel_color > 0 {
+		if priority == 1 && bg_pixel_color > 0 {
 			output_pixel_color = bg_pixel_color
 			palette_addr = BGP_Addr
 		} else {
 			output_pixel_color = obj_pixel_color
-			obj_palette := get_object_attr(drawn_obj, PPU_Object_Attr.DMG_Palette)
-			palette_addr = obj_palette ? OBP1_Addr : OBP0_Addr
+			obj_palette := get_tile_dmg_palette(drawn_obj.attrs)
+			palette_addr = obj_palette == 0 ? OBP0_Addr : OBP1_Addr
 		}
 	} else {
 		output_pixel_color = bg_pixel_color
@@ -308,7 +327,7 @@ get_color_from_palette :: proc(
 	return palette[palette_color_id]
 }
 
-get_bg_tile_id :: proc(mem: ^GB_Memory, x: int, y: int) -> u8 {
+get_bg_tile :: proc(mem: ^GB_Memory, x: int, y: int, color: bool) -> (id: u8, props: u8) {
 	bg_tilemap_addr: u16 = 0
 	in_window := false
 
@@ -335,8 +354,16 @@ get_bg_tile_id :: proc(mem: ^GB_Memory, x: int, y: int) -> u8 {
 	tile_x := x / 8
 	tile_y := y / 8
 	tilemap_offset := (tile_y * 32) + tile_x
+	tile_addr := bg_tilemap_addr + u16(tilemap_offset)
 
-	return mem_read(mem, bg_tilemap_addr + u16(tilemap_offset))
+	id = mem_read(mem, tile_addr)
+
+	if color {
+		// CGB: read BG tile attribute in VRAM bank 1
+		props = mem_read(mem, tile_addr, override_vram_bank = 1)
+	}
+
+	return
 }
 
 get_objects_at_x :: proc(ppu: ^PPU, x: int, res: ^[dynamic]PPU_Object) {
@@ -349,10 +376,40 @@ get_objects_at_x :: proc(ppu: ^PPU, x: int, res: ^[dynamic]PPU_Object) {
 	}
 }
 
-get_object_attr :: proc(obj: PPU_Object, attr: PPU_Object_Attr) -> bool {
-	mask := u8(1) << u8(attr)
+get_tile_priority :: proc(attrs: u8) -> u8 {
+	mask := u8(1) << 7
 
-	return (obj.attrs & mask) > 0
+	return (attrs & mask) >> 7
+}
+
+get_tile_y_flip :: proc(attrs: u8) -> bool {
+	mask := u8(1) << 6
+
+	return (attrs & mask) > 0
+}
+
+get_tile_x_flip :: proc(attrs: u8) -> bool {
+	mask := u8(1) << 5
+
+	return (attrs & mask) > 0
+}
+
+get_tile_dmg_palette :: proc(attrs: u8) -> u8 {
+	mask := u8(1) << 4
+
+	return (attrs & mask) >> 4
+}
+
+// CGB only
+get_tile_bank :: proc(attrs: u8) -> int {
+	mask := u8(1) << 3
+
+	return int((attrs & mask) >> 3)
+}
+
+// CGB only
+get_tile_color_palette :: proc(attrs: u8) -> u8 {
+	return attrs & 0x07
 }
 
 // https://gbdev.io/pandocs/Tile_Data.html
@@ -364,6 +421,7 @@ get_pixel_color :: proc(
 	y_in_tile: int,
 	x_flip := false,
 	y_flip := false,
+	bank := 0,
 ) -> u8 {
 	// a tile is 16 bytes
 	// each 2 bytes represent 1 line of the tile
@@ -382,8 +440,8 @@ get_pixel_color :: proc(
 
 	x_mask := u8(1 << (7 - u8(x_in_tile)))
 	y_offset := u16(y_in_tile * 2)
-	tile_data_low := mem_read(mem, tile_addr + y_offset)
-	tile_data_high := mem_read(mem, tile_addr + y_offset + 1)
+	tile_data_low := mem_read(mem, tile_addr + y_offset, override_vram_bank = bank)
+	tile_data_high := mem_read(mem, tile_addr + y_offset + 1, override_vram_bank = bank)
 	color_low := (tile_data_low & x_mask) > 0 ? 1 : 0
 	color_high := (tile_data_high & x_mask) > 0 ? 1 : 0
 	color_id := u8(color_high << 1) | u8(color_low)
@@ -398,12 +456,12 @@ get_object_pixel_color :: proc(
 	x: int,
 	y: int,
 ) -> (
-	pixel_color: u8,
+	final_pixel_color: u8,
 	selected_obj: PPU_Object,
 ) {
 	ensure(len(objects) <= MaxObjectsPerScanline)
 
-	pixel_color = 0
+	final_pixel_color = 0
 
 	for &obj in objects {
 		x_in_tile := x - obj.x
@@ -425,8 +483,8 @@ get_object_pixel_color :: proc(
 		}
 
 		obj_tile_addr := get_tile_addr(mem, tile_id, is_object = true)
-		x_flip := get_object_attr(obj, PPU_Object_Attr.X_Flip)
-		y_flip := get_object_attr(obj, PPU_Object_Attr.Y_Flip)
+		x_flip := get_tile_x_flip(obj.attrs)
+		y_flip := get_tile_y_flip(obj.attrs)
 		obj_pixel_color := get_pixel_color(
 			ppu,
 			mem,
@@ -437,13 +495,19 @@ get_object_pixel_color :: proc(
 			y_flip,
 		)
 
-		if obj_pixel_color == 0 {
-			continue
-		}
+		if obj_pixel_color > 0 {
+			if ppu.color {
+				// in CGB, object priority is based on position in OAM
+				final_pixel_color = obj_pixel_color
+				return
+			}
 
-		if pixel_color == 0 || (obj.x < selected_obj.x) {
-			selected_obj = obj
-			pixel_color = obj_pixel_color
+			// in DMG mode, object priority is based on X position
+
+			if final_pixel_color == 0 || (obj.x < selected_obj.x) {
+				selected_obj = obj
+				final_pixel_color = obj_pixel_color
+			}
 		}
 	}
 

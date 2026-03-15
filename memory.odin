@@ -78,7 +78,7 @@ mem_write :: proc(gb: ^GB, addr: u16, byte: u8) {
 	}
 }
 
-mem_read :: proc(mem: ^GB_Memory, addr: u16) -> u8 {
+mem_read :: proc(mem: ^GB_Memory, addr: u16, override_vram_bank := -1) -> u8 {
 	if addr == u16(GB_HardRegister.VBK) {
 		// pandocs: Reading from this register will return the number of the
 		// currently loaded VRAM bank in bit 0, and all other bits will be set to 1
@@ -88,7 +88,7 @@ mem_read :: proc(mem: ^GB_Memory, addr: u16) -> u8 {
 		return mem.hdma_transfer.status
 	} else if addr >= 0x8000 && addr <= 0x9FFF {
 		if mem.vram_banking {
-			vram_addr := get_vram_addr(mem, addr)
+			vram_addr := get_vram_addr(mem, addr, override_vram_bank)
 
 			return mem.vram[vram_addr]
 		}
@@ -113,8 +113,9 @@ mem_tick :: proc(gb: ^GB) {
 	}
 }
 
-get_vram_addr :: proc(mem: ^GB_Memory, addr: u16) -> u16 {
-	bank_offset := u16(mem.vram_bank * VRAM_Bank_Size)
+get_vram_addr :: proc(mem: ^GB_Memory, addr: u16, override_vram_bank := -1) -> u16 {
+	bank := override_vram_bank >= 0 ? override_vram_bank : mem.vram_bank
+	bank_offset := u16(bank * VRAM_Bank_Size)
 
 	return bank_offset + (addr - 0x8000)
 }

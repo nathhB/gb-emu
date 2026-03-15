@@ -108,13 +108,13 @@ GB_Audio_Registers :: enum u16 {
 }
 
 gb_init :: proc(gb: ^GB, color: bool) {
-	log.debug("CGB mode: %w", color)
+	log.debugf("CGB mode: %w", color)
 
 	gb.color = color
 
 	mem_init(&gb.mem, color)
 	cpu_init(&gb.cpu)
-	ppu_init(&gb.ppu, &gb.mem)
+	ppu_init(&gb.ppu, &gb.mem, color)
 	apu_init(&gb.apu)
 }
 
@@ -226,15 +226,19 @@ gb_load_rom :: proc(gb: ^GB, path: string) -> GB_Error {
 	case 0:
 		mbc0_init(&gb.mem, rom)
 		copy(gb.mem.data[0x100:], rom[0x100:0x8000]) // map the full rom to 0 - 0x7FFF
-		log.info("No memory controller")
+		log.info("Memory controller: none")
 	case 0x1:
-		mbc1_init(&gb.mem, rom, header.ram_size)
+		mbc1_init(&gb.mem, rom, false)
 		copy(gb.mem.data[0x100:], rom[0x100:0x4000]) // load the first 16kb bank
-		log.info("Using MBC1 memory controller")
+		log.info("Memory controller: MBC1")
+	case 0x2:
+		mbc1_init(&gb.mem, rom, true)
+		copy(gb.mem.data[0x100:], rom[0x100:0x4000]) // load the first 16kb bank
+		log.info("Memory controller: MBC1+RAM")
 	case 0x3:
-		mbc1_init(&gb.mem, rom, header.ram_size)
+		mbc1_init(&gb.mem, rom, true)
 		copy(gb.mem.data[0x100:], rom[0x100:0x4000]) // load the first 16kb bank
-		log.info("Using MBC1 memory controller")
+		log.info("Memory controller: MBC1+RAM+BATTERY")
 	case:
 		return GB_Error.ROM_Unsupported
 	}

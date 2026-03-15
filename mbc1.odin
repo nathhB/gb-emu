@@ -5,12 +5,12 @@ import "core:log"
 
 // https://gbdev.io/pandocs/MBC1.html
 
-mbc1_init :: proc(mem: ^GB_Memory, rom: []u8, ram_size: int) {
+mbc1_init :: proc(mem: ^GB_Memory, rom: []u8, external_ram: bool) {
 	mem.rom = rom
 	mem.write = mbc1_write
 	mem.read = mbc1_read
 	mem.get_ptr = mbc1_get_ptr
-	mem.external_ram = ram_size > 0
+	mem.external_ram = external_ram
 
 	select_rom_bank(mem, 1)
 	select_ram_bank(mem, 0)
@@ -29,14 +29,14 @@ mbc1_write :: proc(gb: ^GB, addr: u16, byte: u8) {
 	}
 
 	if addr <= 0x1FFF {
-		enabled := byte == 0xA
+		enabled := byte == 0x0A
 
 		if !gb.mem.external_ram && enabled {
-			log.debug("Enabled RAM")
+			log.debug("Enabled external RAM")
 		}
 
 		if gb.mem.external_ram && !enabled {
-			log.debug("Disabed RAM")
+			log.debug("Disabed external RAM")
 		}
 
 		gb.mem.external_ram = enabled
@@ -49,6 +49,7 @@ mbc1_write :: proc(gb: ^GB, addr: u16, byte: u8) {
 		fmt.panicf("Selecting banking mode unsupported: %x (addr: %x)", byte, addr)
 		// TODO: check rom and ram size
 		// banking_mode := byte & 0x1
+		// https://gbdev.io/pandocs/MBC1.html#60007fff--banking-mode-select-write-only
 		//
 		// log.debug("MBC1, set banking mode: %d", banking_mode)
 	} else {
