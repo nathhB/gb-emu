@@ -299,8 +299,9 @@ get_pixel_color_at :: proc(ppu: ^PPU, mem: ^GB_Memory, x: int, y: int) -> rl.Col
 
 	if draw_obj {
 		if ppu.color {
-			// TODO:
-			unreachable()
+			palette := get_tile_color_palette(drawn_obj.attrs)
+
+			return get_color_from_object_color_palette(ppu, palette, obj_pixel_color)
 		} else {
 			palette_id := get_tile_dmg_palette(drawn_obj.attrs)
 			palette := palette_id == 0 ? DMG_Palette.OBP0 : DMG_Palette.OBP1
@@ -309,8 +310,9 @@ get_pixel_color_at :: proc(ppu: ^PPU, mem: ^GB_Memory, x: int, y: int) -> rl.Col
 		}
 	} else {
 		if ppu.color {
-			// TODO:
-			unreachable()
+			palette := get_tile_color_palette(bg_tile_props)
+
+			return get_color_from_background_color_palette(ppu, palette, bg_pixel_color)
 		} else {
 			return get_color_from_dmg_palette(ppu, mem, .BGP, bg_pixel_color)
 		}
@@ -343,6 +345,16 @@ get_color_from_dmg_palette :: proc(
 	palette_color_id := (palette_data & mask) >> (color_id * 2)
 
 	return colors[palette_color_id]
+}
+
+get_color_from_background_color_palette :: proc(ppu: ^PPU, palette: u8, color_id: u8) -> rl.Color {
+	// TODO:
+	return rl.WHITE
+}
+
+get_color_from_object_color_palette :: proc(ppu: ^PPU, palette: u8, color_id: u8) -> rl.Color {
+	// TODO:
+	return rl.WHITE
 }
 
 get_bg_tile :: proc(mem: ^GB_Memory, x: int, y: int, color: bool) -> (id: u8, props: u8) {
