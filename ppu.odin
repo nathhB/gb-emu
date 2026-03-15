@@ -301,7 +301,7 @@ get_pixel_color_at :: proc(ppu: ^PPU, mem: ^GB_Memory, x: int, y: int) -> rl.Col
 		if ppu.color {
 			palette := get_tile_color_palette(drawn_obj.attrs)
 
-			return get_color_from_object_color_palette(ppu, palette, obj_pixel_color)
+			return get_color_from_obj_color_palette(ppu, mem, palette, obj_pixel_color)
 		} else {
 			palette_id := get_tile_dmg_palette(drawn_obj.attrs)
 			palette := palette_id == 0 ? DMG_Palette.OBP0 : DMG_Palette.OBP1
@@ -312,7 +312,7 @@ get_pixel_color_at :: proc(ppu: ^PPU, mem: ^GB_Memory, x: int, y: int) -> rl.Col
 		if ppu.color {
 			palette := get_tile_color_palette(bg_tile_props)
 
-			return get_color_from_background_color_palette(ppu, palette, bg_pixel_color)
+			return get_color_from_bg_color_palette(ppu, mem, palette, bg_pixel_color)
 		} else {
 			return get_color_from_dmg_palette(ppu, mem, .BGP, bg_pixel_color)
 		}
@@ -347,14 +347,52 @@ get_color_from_dmg_palette :: proc(
 	return colors[palette_color_id]
 }
 
-get_color_from_background_color_palette :: proc(ppu: ^PPU, palette: u8, color_id: u8) -> rl.Color {
-	// TODO:
-	return rl.WHITE
+get_color_from_bg_color_palette :: proc(
+	ppu: ^PPU,
+	mem: ^GB_Memory,
+	palette: u8,
+	color: u8,
+) -> rl.Color {
+	// https://gbdev.io/pandocs/Palettes.html#ff69--bcpdbgpd-cgb-mode-only-background-color-palette-data--background-palette-data
+
+	assert(color >= 0 && color < 4)
+
+	addr := (palette * 8) + (color * 2)
+	color_byte_lo := mem.bg_palettes[addr]
+	color_byte_hi := mem.bg_palettes[addr + 1]
+	color16 := (u16(color_byte_hi) << 8) | u16(color_byte_lo)
+	r5 := u8(color16 & 0x1F)
+	g5 := u8((color16 >> 5) & 0x1F)
+	b5 := u8((color16 >> 10) & 0x1F)
+	r8 := r5 << 3
+	g8 := g5 << 3
+	b8 := b5 << 3
+
+	return rl.Color{r8, g8, b8, 255}
 }
 
-get_color_from_object_color_palette :: proc(ppu: ^PPU, palette: u8, color_id: u8) -> rl.Color {
-	// TODO:
-	return rl.WHITE
+get_color_from_obj_color_palette :: proc(
+	ppu: ^PPU,
+	mem: ^GB_Memory,
+	palette: u8,
+	color: u8,
+) -> rl.Color {
+	// https://gbdev.io/pandocs/Palettes.html#ff69--bcpdbgpd-cgb-mode-only-background-color-palette-data--background-palette-data
+
+	assert(color > 0 && color < 4)
+
+	addr := (palette * 8) + (color * 2)
+	color_byte_lo := mem.obj_palettes[addr]
+	color_byte_hi := mem.obj_palettes[addr + 1]
+	color16 := (u16(color_byte_hi) << 8) | u16(color_byte_lo)
+	r5 := u8(color16 & 0x1F)
+	g5 := u8((color16 >> 5) & 0x1F)
+	b5 := u8((color16 >> 10) & 0x1F)
+	r8 := r5 << 3
+	g8 := g5 << 3
+	b8 := b5 << 3
+
+	return rl.Color{r8, g8, b8, 255}
 }
 
 get_bg_tile :: proc(mem: ^GB_Memory, x: int, y: int, color: bool) -> (id: u8, props: u8) {

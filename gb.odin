@@ -9,7 +9,8 @@ import rl "vendor:raylib"
 FrameDots: u64 = ScanelineDots * FrameScanlines
 ScreenWidth :: 160
 ScreenHeight :: 144
-BootRomPath :: "ROMS/dmg_boot.gb"
+DMG_BootRomPath :: "ROMS/dmg.bin"
+CGB_BootRomPath :: "ROMS/cgb.bin"
 
 GB :: struct {
 	mem:           GB_Memory,
@@ -249,7 +250,7 @@ gb_load_rom :: proc(gb: ^GB, path: string) -> GB_Error {
 }
 
 load_boot_rom :: proc(gb: ^GB) -> GB_Error {
-	data, success := os.read_entire_file(BootRomPath)
+	data, success := os.read_entire_file(gb.color ? CGB_BootRomPath : DMG_BootRomPath)
 
 	if !success {
 		return GB_Error.ROM_FileError

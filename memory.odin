@@ -15,6 +15,8 @@ GB_Memory :: struct {
 	rom:           []u8,
 	vram:          [VRAM_Size]u8,
 	wram:          [WRAM_Size]u8,
+	bg_palettes:   [64]u8, // CGB: background palettes RAM
+	obj_palettes:  [64]u8, // CGB: object palettes RAM
 	rom_bank:      int,
 	ram_bank:      int,
 	vram_bank:     int,
