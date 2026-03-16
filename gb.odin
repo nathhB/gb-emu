@@ -82,6 +82,10 @@ GB_HardRegister :: enum u16 {
 	HDMA3  = 0xFF53,
 	HDMA4  = 0xFF54,
 	HDMA5  = 0xFF55,
+	BCPS   = 0xFF68,
+	BCPD   = 0xFF69,
+	OCPS   = 0xFF6A,
+	OCPD   = 0xFF6B,
 }
 
 GB_Audio_Registers :: enum u16 {

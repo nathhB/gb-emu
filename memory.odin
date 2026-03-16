@@ -17,6 +17,10 @@ GB_Memory :: struct {
 	wram:          [WRAM_Size]u8,
 	bg_palettes:   [64]u8, // CGB: background palettes RAM
 	obj_palettes:  [64]u8, // CGB: object palettes RAM
+	bgp_addr:      u8, // CGB
+	bgp_auto_incr: bool, // CGB
+	obp_addr:      u8, // CGB
+	obp_auto_incr: bool, // CGB
 	rom_bank:      int,
 	ram_bank:      int,
 	vram_bank:     int,
@@ -154,6 +158,14 @@ write_to_hardware_register :: proc(gb: ^GB, addr: u16, byte: u8) {
 		write_to_wbk(&gb.mem, byte)
 	} else if reg == .HDMA5 {
 		write_to_hdma_transfer(&gb.mem, byte)
+	} else if reg == .BCPS {
+		write_to_bcps(&gb.mem, byte)
+	} else if reg == .OCPS {
+		write_to_ocps(&gb.mem, byte)
+	} else if reg == .BCPD {
+		write_to_bcpd(&gb.mem, byte)
+	} else if reg == .OCPD {
+		write_to_ocpd(&gb.mem, byte)
 	} else {
 		gb.mem.write(gb, addr, byte)
 	}
@@ -295,4 +307,30 @@ hdma_copy_one_block :: proc(gb: ^GB) {
 
 hdma_transfer_is_active :: proc(mem: ^GB_Memory) -> bool {
 	return (mem.hdma_transfer.status & (1 << 7)) == 0
+}
+
+write_to_bcps :: proc(mem: ^GB_Memory, byte: u8) {
+	mem.bgp_auto_incr = (byte & (1 << 7)) > 0
+	mem.bgp_addr = byte & 0b00111111
+}
+
+write_to_ocps :: proc(mem: ^GB_Memory, byte: u8) {
+	mem.obp_auto_incr = (byte & (1 << 7)) > 0
+	mem.obp_addr = byte & 0b00111111
+}
+
+write_to_bcpd :: proc(mem: ^GB_Memory, byte: u8) {
+	mem.bg_palettes[mem.bgp_addr] = byte
+
+	if mem.bgp_auto_incr {
+		mem.bgp_addr = (mem.bgp_addr + 1) % 64
+	}
+}
+
+write_to_ocpd :: proc(mem: ^GB_Memory, byte: u8) {
+	mem.obj_palettes[mem.obp_addr] = byte
+
+	if mem.obp_auto_incr {
+		mem.obp_addr = (mem.obp_addr + 1) % 64
+	}
 }
