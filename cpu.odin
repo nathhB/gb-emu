@@ -23,6 +23,7 @@ CPU_State :: enum {
 	ExecuteInstruction,
 	ExecuteInterrupt,
 	Halted,
+	Breakpoint,
 }
 
 Breakpoint_Proc :: #type proc(gb: ^GB)
@@ -34,18 +35,21 @@ CPU :: struct {
 	hl:                    u16,
 	sp:                    u16,
 	pc:                    u16,
+	op_pc:                 u16,
+	op_len:                int,
 	ime:                   bool,
 	instructions:          [0xFF + 1]Instruction,
 	prefixed_instructions: [0xFF + 1]Instruction,
 	interrupt_handlers:    [5]u16,
 	state:                 CPU_State,
 	exec_op:               u8,
+	prefixed_op:           bool,
 	exec_cyles:            int,
 	enable_interrupts:     bool,
 	breakpoints:           map[u16]Breakpoint_Proc,
 	breakpoint:            u16,
-	skip_breakpoint:       bool,
-	break_next:            bool, // break on the next instruction
+	stepping:              bool,
+	break_next:            bool,
 }
 
 Instruction :: struct {
@@ -78,14 +82,15 @@ cpu_tick :: proc(gb: ^GB) {
 	}
 
 	switch gb.cpu.state {
-	case CPU_State.Fetch:
+	case .Fetch:
 		do_fetch_state(gb)
-	case CPU_State.ExecuteInstruction:
+	case .ExecuteInstruction:
 		do_execute_instruction_state(&gb.cpu)
-	case CPU_State.ExecuteInterrupt:
+	case .ExecuteInterrupt:
 		do_execute_interrupt_state(&gb.cpu)
-	case CPU_State.Halted:
+	case .Halted:
 		do_halted_state(gb)
+	case .Breakpoint:
 	}
 }
 
@@ -102,18 +107,23 @@ cpu_add_breakpoint :: proc(cpu: ^CPU, addr: u16, bp_proc: Breakpoint_Proc) {
 
 // step to the next instruction and break
 cpu_step :: proc(cpu: ^CPU) {
-	if cpu.breakpoint == 0 {
-		panic("cannot step when no breakpoint is active")
-	}
+	ensure(cpu.breakpoint != 0)
+	ensure(cpu.state == .Breakpoint)
 
 	cpu.breakpoint = 0
-	cpu.break_next = true
-	cpu.skip_breakpoint = true
+	cpu.stepping = true
+	cpu.break_next = false
+	cpu.state = .Fetch
 }
 
 cpu_continue :: proc(cpu: ^CPU) {
+	ensure(cpu.breakpoint != 0)
+	ensure(cpu.state == .Breakpoint)
+
 	cpu.breakpoint = 0
-	cpu.skip_breakpoint = true
+	cpu.stepping = false
+	cpu.break_next = false
+	cpu.state = .Fetch
 }
 
 check_breakpoints :: proc(cpu: ^CPU) -> (bool, Breakpoint_Proc) {
@@ -126,41 +136,14 @@ check_breakpoints :: proc(cpu: ^CPU) -> (bool, Breakpoint_Proc) {
 	return false, nil
 }
 
-process_breakpoints :: proc(gb: ^GB, prefixed: bool) -> bool {
+process_breakpoints :: proc(gb: ^GB, instr: ^Instruction) -> bool {
 	cpu := &gb.cpu
-
-	if cpu.skip_breakpoint {
-		return false
-	}
-
-	if cpu.break_next {
-		cpu.breakpoint = cpu.pc
-		cpu.break_next = false
-		cpu.skip_breakpoint = true
-
-		instr := get_instruction(cpu, cpu.exec_op, prefixed)
-
-		log.debugf(
-			"Breakpoint: 0x%4x - %s (0x%2x) (FFA6 = %x)",
-			cpu.pc,
-			instr.mnemonic,
-			cpu.exec_op,
-			mem_read(&gb.mem, 0xFFA6),
-		)
-		print_cpu(cpu)
-	}
-
 	bp, bp_proc := check_breakpoints(cpu)
 
 	if bp {
-		instr := get_instruction(cpu, cpu.exec_op, prefixed)
-
 		log.debugf("Breakpoint: 0x%4x - %s (0x%2x)", cpu.pc, instr.mnemonic, cpu.exec_op)
 
 		bp_proc(gb)
-
-		cpu.breakpoint = cpu.pc
-		cpu.break_next = false
 
 		return true
 	}
@@ -168,7 +151,7 @@ process_breakpoints :: proc(gb: ^GB, prefixed: bool) -> bool {
 	return false
 }
 
-get_instruction :: proc(cpu: ^CPU, op: u8, prefixed: bool) -> Instruction {
+cpu_get_instruction :: proc(cpu: ^CPU, op: u8, prefixed: bool) -> Instruction {
 	instructions := prefixed ? cpu.prefixed_instructions[:] : cpu.instructions[:]
 
 	return instructions[op]
@@ -182,36 +165,59 @@ do_fetch_state :: proc(gb: ^GB) {
 	op := mem_read(&gb.mem, gb.cpu.pc)
 	prefixed := false
 
+	gb.cpu.op_pc = gb.cpu.pc
+
 	if op == 0xCB {
 		prefixed = true
-		gb.cpu.pc += 1
-		op = mem_read(&gb.mem, gb.cpu.pc)
+		op = mem_read(&gb.mem, gb.cpu.pc + 1)
 	}
-
-	op_pc := gb.cpu.pc
-	instr := get_instruction(&gb.cpu, op, prefixed)
 
 	gb.cpu.exec_op = op
+	gb.cpu.prefixed_op = prefixed
 
-	if process_breakpoints(gb, prefixed) {
-		return // we hit a breakpoint
+	instr := cpu_get_instruction(&gb.cpu, op, prefixed)
+
+	gb.cpu.op_len = instr.len
+	if (prefixed) {
+		gb.cpu.op_len += 1
 	}
 
-	gb.cpu.pc += 1
+	if gb.cpu.stepping {
+		if gb.cpu.break_next {
+			gb.cpu.state = .Breakpoint
+			gb.cpu.breakpoint = gb.cpu.pc
+			return
+		}
+	} else {
+		if process_breakpoints(gb, &instr) {
+			gb.cpu.state = .Breakpoint
+			gb.cpu.breakpoint = gb.cpu.pc
+			return
+		}
+	}
 
 	data: u16 = 0
-	len := instr.len - 1
 
-	if len > 0 {
-		data = fetch(&gb.cpu, &gb.mem, len)
-
-		gb.cpu.pc += u16(len)
+	if instr.len > 1 {
+		data = fetch(&gb.cpu, &gb.mem, instr.len)
 	}
 
-	if (gb.cpu.pc >= 0x100) {
-		// log.debugf("0x%x - %s (0x%x) 0x%x (SP: %d)", op_pc, instr.mnemonic, op, data, cpu.sp)
-		// print_cpu(cpu)
+	gb.cpu.pc += u16(instr.len)
+	if (prefixed) {
+		gb.cpu.pc += 1
 	}
+
+	// if (gb.cpu.pc >= 0x100) {
+	// 	log.debugf(
+	// 		"0x%x - %s (0x%x) 0x%x (SP: 0x%4x)",
+	// 		gb.cpu.op_pc,
+	// 		instr.mnemonic,
+	// 		op,
+	// 		data,
+	// 		gb.cpu.sp,
+	// 	)
+	// 	print_cpu(&gb.cpu)
+	// }
 
 	instr.func(gb, data)
 
@@ -243,8 +249,11 @@ do_execute_instruction_state :: proc(cpu: ^CPU) {
 		cpu.enable_interrupts = true
 	}
 
+	if cpu.stepping {
+		cpu.break_next = true
+	}
+
 	cpu.state = CPU_State.Fetch
-	cpu.skip_breakpoint = false
 }
 
 do_execute_interrupt_state :: proc(cpu: ^CPU) {
@@ -277,12 +286,12 @@ do_halted_state :: proc(gb: ^GB) {
 }
 
 fetch :: proc(cpu: ^CPU, mem: ^GB_Memory, len: int) -> u16 {
-	assert(len == 1 || len == 2)
+	assert(len == 2 || len == 3)
 
-	data := u16(mem_read(mem, cpu.pc))
+	data := u16(mem_read(mem, cpu.pc + 1))
 
-	if len == 2 {
-		data |= (u16(mem_read(mem, cpu.pc + 1)) << 8)
+	if len == 3 {
+		data |= (u16(mem_read(mem, cpu.pc + 2)) << 8)
 	}
 
 	return data
@@ -838,7 +847,7 @@ swap :: proc(cpu: ^CPU, byte: ^u8) {
 }
 
 bit :: proc(cpu: ^CPU, byte: ^u8, b: u8) {
-	write_flag(cpu, Flags.Z, !(byte^ & (1 << b) > 0))
+	write_flag(cpu, Flags.Z, !((byte^ & (1 << b)) > 0))
 	write_flag(cpu, Flags.N, false)
 	write_flag(cpu, Flags.H, true)
 }

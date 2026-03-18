@@ -9,14 +9,14 @@ import rl "vendor:raylib"
 FrameDots: u64 = ScanelineDots * FrameScanlines
 ScreenWidth :: 160
 ScreenHeight :: 144
-DMG_BootRomPath :: "ROMS/dmg.bin"
-CGB_BootRomPath :: "ROMS/cgb.bin"
 
 GB :: struct {
+	rom_header:    ROM_Header,
 	mem:           GB_Memory,
 	cpu:           CPU,
 	ppu:           PPU,
 	apu:           APU,
+	booting:       bool,
 	booted:        bool,
 	div_acc:       u64,
 	timer_acc:     u64,
@@ -50,6 +50,7 @@ GB_Error :: enum u32 {
 	ROM_InvalidSize,
 	ROM_Unsupported,
 	ROM_FailedToLoadBoot,
+	MBC_Unsupported,
 }
 
 ROM_Header :: struct {
@@ -138,9 +139,12 @@ gb_run :: proc(gb: ^GB) {
 	screen_texture.texture.format = rl.PixelFormat.UNCOMPRESSED_R8G8B8A8
 
 	for !rl.WindowShouldClose() {
-		if !gb.booted && mem_read(&gb.mem, 0xFF50) != 0 {
-			unload_boot_rom(gb)
+		if gb.booting && !gb.booted && mem_read(&gb.mem, 0xFF50) != 0 {
+			log.infof("Boot process completed")
+
 			gb.booted = true
+			gb.booting = false
+			gb_map_rom(gb)
 		}
 
 		if gb.cpu.breakpoint == 0 {
@@ -202,75 +206,161 @@ gb_run :: proc(gb: ^GB) {
 			}
 
 			rl.DrawFPS(0, 0)
-			// draw_debugger_info(gb);
+			draw_debugger_info(gb)
 		}
 		rl.EndDrawing()
 	}
 }
 
-gb_load_rom :: proc(gb: ^GB, path: string) -> GB_Error {
-	rom, success := os.read_entire_file(path)
+gb_load_rom :: proc(gb: ^GB, rom_path: string) -> GB_Error {
+	rom, success := os.read_entire_file(rom_path)
 
 	if !success {
-		return GB_Error.ROM_FileError
+		return .ROM_FileError
 	}
 
-	header := read_rom_header(rom)
+	gb.rom_header = read_rom_header(rom)
 
-	if (len(rom) != header.rom_size) {
-		return GB_Error.ROM_InvalidSize
+	if (len(rom) != gb.rom_header.rom_size) {
+		return .ROM_InvalidSize
 	}
 
-	if load_boot_rom(gb) != GB_Error.None {
-		return GB_Error.ROM_FailedToLoadBoot
-	}
+	gb.mem.rom = rom
 
-	print_rom_info(header)
+	print_rom_info(gb.rom_header)
 
-	switch header.rom_type {
-	case 0:
-		mbc0_init(&gb.mem, rom)
-		copy(gb.mem.data[0x100:], rom[0x100:0x8000]) // map the full rom to 0 - 0x7FFF
-		log.info("Memory controller: none")
-	case 0x1:
-		mbc1_init(&gb.mem, rom, false)
-		copy(gb.mem.data[0x100:], rom[0x100:0x4000]) // load the first 16kb bank
-		log.info("Memory controller: MBC1")
-	case 0x2:
-		mbc1_init(&gb.mem, rom, true)
-		copy(gb.mem.data[0x100:], rom[0x100:0x4000]) // load the first 16kb bank
-		log.info("Memory controller: MBC1+RAM")
-	case 0x3:
-		mbc1_init(&gb.mem, rom, true)
-		copy(gb.mem.data[0x100:], rom[0x100:0x4000]) // load the first 16kb bank
-		log.info("Memory controller: MBC1+RAM+BATTERY")
-	case:
-		return GB_Error.ROM_Unsupported
-	}
-
-	log.infof("Successfully loaded ROM %s (size: %d)", path, len(rom))
-
-	return GB_Error.None
+	return .None
 }
 
-load_boot_rom :: proc(gb: ^GB) -> GB_Error {
-	data, success := os.read_entire_file(gb.color ? CGB_BootRomPath : DMG_BootRomPath)
+gb_init_mbc :: proc(gb: ^GB) -> GB_Error {
+	switch gb.rom_header.rom_type {
+	case 0:
+		mbc0_init(&gb.mem)
+		log.info("Memory controller: none")
+	case 0x1:
+		mbc1_init(&gb.mem, false)
+		log.info("Memory controller: MBC1")
+	case 0x2:
+		mbc1_init(&gb.mem, true)
+		log.info("Memory controller: MBC1+RAM")
+	case 0x3:
+		mbc1_init(&gb.mem, true)
+		log.info("Memory controller: MBC1+RAM+BATTERY")
+	case:
+		return .MBC_Unsupported
+	}
+
+	return .None
+}
+
+gb_boot :: proc(gb: ^GB, boot_rom_path: string) -> GB_Error {
+	gb.booting = true
+
+	err := gb.color ? load_cgb_boot_rom(gb, boot_rom_path) : load_dmg_boot_rom(gb, boot_rom_path)
+
+	if err != .None {
+		log.errorf("Failed to load boot ROM: %w", err)
+		return .ROM_FailedToLoadBoot
+	}
+
+	gb_init_mbc(gb) or_return
+
+	// TODO: can't map ROM 0x100 - .. for CGB boot rom
+	if gb.color {
+		panic("Unsupported")
+	}
+
+	switch gb.rom_header.rom_type {
+	case 0:
+		copy(gb.mem.data[0x100:], gb.mem.rom[0x100:0x8000]) // map the full rom to 0 - 0x7FFF
+	case 0x1:
+		copy(gb.mem.data[0x100:], gb.mem.rom[0x100:0x4000]) // load the first 16kb bank
+	case 0x2:
+		copy(gb.mem.data[0x100:], gb.mem.rom[0x100:0x4000]) // load the first 16kb bank
+	case 0x3:
+		copy(gb.mem.data[0x100:], gb.mem.rom[0x100:0x4000]) // load the first 16kb bank
+	case:
+		return .ROM_Unsupported
+	}
+
+	return .None
+}
+
+gb_map_rom :: proc(gb: ^GB) {
+	rom := gb.mem.rom
+
+	switch gb.rom_header.rom_type {
+	case 0:
+		copy(gb.mem.data[:], rom[:0x8000]) // map the full rom to 0 - 0x7FFF
+	case 0x1:
+		copy(gb.mem.data[:], rom[:0x4000]) // load the first 16kb bank
+	case 0x2:
+		copy(gb.mem.data[:], rom[:0x4000]) // load the first 16kb bank
+	case 0x3:
+		copy(gb.mem.data[:], rom[:0x4000]) // load the first 16kb bank
+	case:
+		unreachable()
+	}
+}
+
+gb_init_dmg_registers :: proc(gb: ^GB) {
+	gb.cpu.pc = 0x100
+	gb.cpu.sp = 0xFFFE
+	gb.cpu.af = 0x01B0
+	gb.cpu.bc = 0x0013
+	gb.cpu.de = 0x00D8
+	gb.cpu.hl = 0x014D
+
+	mem_write(gb, u16(GB_HardRegister.LCDC), 0x91)
+	mem_write(gb, u16(GB_HardRegister.IF), 0xE1)
+	mem_write(gb, u16(GB_HardRegister.IE), 0x0)
+	mem_write(gb, u16(GB_HardRegister.JOYPAD), 0xCF)
+}
+
+gb_init_cgb_registers :: proc(gb: ^GB) {
+	gb_init_dmg_registers(gb)
+
+	gb.cpu.af = 0x1180
+	gb.cpu.bc = 0x0000
+	gb.cpu.de = 0xFF56
+	gb.cpu.hl = 0x000D
+
+	mem_write(gb, u16(GB_HardRegister.VBK), 0)
+	mem_write(gb, u16(GB_HardRegister.WBK), 1)
+	mem_write(gb, u16(GB_HardRegister.HDMA5), 0xFF)
+	mem_write(gb, u16(GB_HardRegister.BCPS), 0)
+	mem_write(gb, u16(GB_HardRegister.OCPS), 0)
+}
+
+load_dmg_boot_rom :: proc(gb: ^GB, rom_path: string) -> GB_Error {
+	data, success := os.read_entire_file(rom_path)
 
 	if !success {
-		return GB_Error.ROM_FileError
+		return .ROM_FileError
 	}
 
 	if (len(data) > 0x100) {
-		return GB_Error.ROM_TooBig
+		return .ROM_TooBig
 	}
 
 	copy(gb.mem.data[:], data)
 
-	return GB_Error.None
+	return .None
 }
 
-unload_boot_rom :: proc(gb: ^GB) {
-	copy(gb.mem.data[0:0x100], gb.mem.rom[0:0x100])
+load_cgb_boot_rom :: proc(gb: ^GB, rom_path: string) -> GB_Error {
+	// https://gbdev.io/pandocs/Power_Up_Sequence.html#size
+	boot_rom, success := os.read_entire_file(rom_path)
+
+	if !success {
+		return .ROM_FileError
+	}
+
+	copy(gb.mem.data[:0x100], boot_rom[:0x100]) // Boot ROM first part
+	copy(gb.mem.data[0x100:0x200], gb.mem.rom[0x100:0x200]) // ROM header
+	copy(gb.mem.data[0x200:], boot_rom[0x200:]) // Boot ROM second part
+
+	return .None
 }
 
 do_frame :: proc(gb: ^GB) {

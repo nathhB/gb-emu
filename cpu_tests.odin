@@ -1,5 +1,6 @@
 package gb_emu
 
+import "core:testing"
 
 /*@(test)
 write_read_registers :: proc(t: ^testing.T) {
@@ -16,7 +17,7 @@ write_read_registers :: proc(t: ^testing.T) {
 	testing.expect_value(t, read_register_high(cpu.de), u8(255))
 	testing.expect_value(t, read_register_high(cpu.hl), u8(128))
 	testing.expect_value(t, read_register_low(cpu.hl), u8(55))
-}
+}*/
 
 @(test)
 write_read_flags :: proc(t: ^testing.T) {
@@ -39,7 +40,7 @@ write_read_flags :: proc(t: ^testing.T) {
 	testing.expect(t, read_flag(&cpu, Flags.H))
 }
 
-@(test)
+/*@(test)
 inc_registers :: proc(t: ^testing.T) {
 	cpu := CPU{}
 
@@ -526,3 +527,16 @@ run_cpu :: proc(cpu: ^CPU, mem: ^GB_Memory, ticks: int) {
 		cpu_tick(cpu, mem)
 	}
 }*/
+
+@(test)
+bit_0x7f :: proc(t: ^testing.T) {
+	gb: GB
+
+	gb_init(&gb, false)
+	mbc_dummy_init(&gb.mem)
+
+	gb.cpu.af = 0x00d0
+	BIT_0x7f(&gb, 0)
+
+	testing.expect_value(t, gb.cpu.af, 0x00b0)
+}

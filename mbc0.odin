@@ -4,8 +4,7 @@ import "core:fmt"
 
 // https://gbdev.io/pandocs/nombc.html
 
-mbc0_init :: proc(mem: ^GB_Memory, rom: []u8) {
-	mem.rom = rom
+mbc0_init :: proc(mem: ^GB_Memory) {
 	mem.write = mbc0_write
 	mem.read = mbc0_read
 	mem.get_ptr = mbc0_get_ptr
@@ -28,7 +27,7 @@ mbc0_read :: proc(mem: ^GB_Memory, addr: u16) -> u8 {
 }
 
 mbc0_get_ptr :: proc(mem: ^GB_Memory, addr: u16) -> ^u8 {
-	if addr < 8000 {
+	if addr < 8000 && (addr < 0x100 || addr > 0x200) {
 		panic("Tried to get a pointer to ROM")
 	}
 

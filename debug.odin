@@ -34,7 +34,7 @@ print_cpu :: proc(cpu: ^CPU) {
 		cpu.de,
 		cpu.hl,
 		cpu.sp,
-		cpu.pc,
+		cpu.op_pc,
 		z,
 		h,
 		n,
@@ -79,6 +79,9 @@ draw_debugger_info :: proc(gb: ^GB) {
 	defer delete(flags_str)
 	ime_str := gb.cpu.ime ? "Enabled" : "Disabled"
 
+	instr := cpu_get_instruction(&gb.cpu, gb.cpu.exec_op, gb.cpu.prefixed_op)
+	instr_str := rl.TextFormat("0x%4x - %s (0x%x)", gb.cpu.op_pc, instr.mnemonic, gb.cpu.exec_op)
+
 	cpu_str := rl.TextFormat(
 		"AF: %4x, BC: %4x, DE: %4x, HL: %4x, SP: %4x, PC: %4x | %s | IME: %s",
 		gb.cpu.af,
@@ -86,11 +89,12 @@ draw_debugger_info :: proc(gb: ^GB) {
 		gb.cpu.de,
 		gb.cpu.hl,
 		gb.cpu.sp,
-		gb.cpu.pc,
+		gb.cpu.op_pc,
 		flags_str,
 		ime_str,
 	)
 
+	rl.DrawText(instr_str, 5, rl.GetScreenHeight() - 110, 16, rl.RED)
 	rl.DrawText(cpu_str, 5, rl.GetScreenHeight() - 80, 16, rl.RED)
 
 	// draw info about timers
