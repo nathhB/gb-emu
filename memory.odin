@@ -1,5 +1,6 @@
 package gb_emu
 
+import "core:fmt"
 import "core:log"
 import rl "vendor:raylib"
 
@@ -28,7 +29,6 @@ GB_Memory :: struct {
 	external_ram:  bool,
 	read:          proc(mem: ^GB_Memory, addr: u16) -> u8,
 	write:         proc(gb: ^GB, addr: u16, byte: u8),
-	get_ptr:       proc(mem: ^GB_Memory, addr: u16) -> ^u8,
 	oam_transfer:  struct {
 		active:   bool,
 		src_addr: u16,
@@ -110,7 +110,21 @@ mem_read :: proc(mem: ^GB_Memory, addr: u16, override_vram_bank := -1) -> u8 {
 }
 
 mem_get_ptr :: proc(mem: ^GB_Memory, addr: u16) -> ^u8 {
-	return mem.get_ptr(mem, addr)
+	if addr < 8000 && (addr < 0x100 || addr > 0x200) {
+		fmt.panicf("Tried to get a pointer to ROM: 0x%x", addr)
+	}
+
+	if addr >= 0x8000 && addr <= 0x9FFF {
+		if mem.vram_banking {
+			return &mem.vram[get_vram_addr(mem, addr)]
+		}
+	} else if addr >= 0xD000 && addr <= 0xDFFF {
+		if mem.wram_banking {
+			return &mem.wram[get_wram_addr(mem, addr)]
+		}
+	}
+
+	return &mem.data[addr]
 }
 
 mem_tick :: proc(gb: ^GB) {

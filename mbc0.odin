@@ -7,7 +7,6 @@ import "core:fmt"
 mbc0_init :: proc(mem: ^GB_Memory) {
 	mem.write = mbc0_write
 	mem.read = mbc0_read
-	mem.get_ptr = mbc0_get_ptr
 }
 
 mbc0_write :: proc(gb: ^GB, addr: u16, byte: u8) {
@@ -24,12 +23,4 @@ mbc0_write :: proc(gb: ^GB, addr: u16, byte: u8) {
 
 mbc0_read :: proc(mem: ^GB_Memory, addr: u16) -> u8 {
 	return mem.data[addr]
-}
-
-mbc0_get_ptr :: proc(mem: ^GB_Memory, addr: u16) -> ^u8 {
-	if addr < 8000 && (addr < 0x100 || addr > 0x200) {
-		panic("Tried to get a pointer to ROM")
-	}
-
-	return &mem.data[addr]
 }

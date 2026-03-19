@@ -2306,7 +2306,9 @@ INC_0x34 :: proc(gb: ^GB, data: u16) {
    Flags: Z 1 H -
  */
 DEC_0x35 :: proc(gb: ^GB, data: u16) {
-	dec_byte(&gb.cpu, mem_get_ptr(&gb.mem, gb.cpu.hl))
+	b := mem_get_ptr(&gb.mem, gb.cpu.hl)
+
+	dec_byte(&gb.cpu, b)
 }
 
 /*

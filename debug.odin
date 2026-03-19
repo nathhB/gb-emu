@@ -43,11 +43,11 @@ print_cpu :: proc(cpu: ^CPU) {
 	)
 }
 
-dump_vram :: proc(cpu: ^CPU, mem: ^GB_Memory) {
-	dump_memory(cpu, mem, 0x8000, 0x9FFF)
+dump_vram :: proc(gb: ^GB) {
+	dump_memory(gb, 0x8000, 0x9FFF)
 }
 
-dump_memory :: proc(cpu: ^CPU, mem: ^GB_Memory, start_addr: u16, end_addr: u16) {
+dump_memory :: proc(gb: ^GB, start_addr: u16, end_addr: u16) {
 	addr := start_addr
 	sb := strings.Builder{}
 
@@ -58,7 +58,7 @@ dump_memory :: proc(cpu: ^CPU, mem: ^GB_Memory, start_addr: u16, end_addr: u16) 
 		strings.write_string(&sb, fmt.aprintf("0x%x\t", addr))
 
 		for i: u16 = 0; i < 16; i += 1 {
-			byte := mem_read(mem, addr + i)
+			byte := mem_read(&gb.mem, addr + i)
 
 			strings.write_string(&sb, fmt.aprintf("%2x ", byte))
 		}
@@ -123,7 +123,7 @@ process_debug_inputs :: proc(gb: ^GB, debug_ctx: ^GB_Debug_Context) {
 	}
 
 	if rl.IsKeyPressed(rl.KeyboardKey.D) {
-		dump_memory(&gb.cpu, &gb.mem, 0xFE00, 0xFE9F)
+		dump_memory(gb, 0xD000, 0xDFFF)
 	}
 
 	if rl.IsKeyPressed(rl.KeyboardKey.T) {

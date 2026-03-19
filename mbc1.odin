@@ -8,7 +8,6 @@ import "core:log"
 mbc1_init :: proc(mem: ^GB_Memory, external_ram: bool) {
 	mem.write = mbc1_write
 	mem.read = mbc1_read
-	mem.get_ptr = mbc1_get_ptr
 	mem.external_ram = external_ram
 
 	select_rom_bank(mem, 1)
@@ -89,12 +88,4 @@ mbc1_read :: proc(mem: ^GB_Memory, addr: u16) -> u8 {
 	}
 
 	return mem.data[addr]
-}
-
-mbc1_get_ptr :: proc(mem: ^GB_Memory, addr: u16) -> ^u8 {
-	if addr < 8000 && (addr < 0x100 || addr > 0x200) {
-		fmt.panicf("Tried to get a pointer to ROM: 0x%x", addr)
-	}
-
-	return &mem.data[addr]
 }

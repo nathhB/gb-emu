@@ -147,10 +147,11 @@ gb_run :: proc(gb: ^GB) {
 			gb_map_rom(gb)
 		}
 
+		process_debug_inputs(gb, &debug_ctx)
+
 		if gb.cpu.breakpoint == 0 {
 			read_inputs(gb)
 			do_frame(gb)
-			process_debug_inputs(gb, &debug_ctx)
 		} else {
 			process_debugger_inputs(&gb.cpu)
 		}

@@ -70,7 +70,7 @@ main :: proc() {
 	bp := proc(gb: ^GB) {
 
 	}
-	cpu_add_breakpoint(&gb.cpu, 0x455f, bp)
+	// cpu_add_breakpoint(&gb.cpu, 0x415f, bp)
 
 	gb_run(&gb)
 }
