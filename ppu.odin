@@ -245,7 +245,7 @@ get_pixel_color_at :: proc(gb: ^GB, x: int, y: int) -> rl.Color {
 	scy := int(mem_read(mem, u16(GB_HardRegister.SCY)))
 	tilemap_x := (scx + x) % 256
 	tilemap_y := (scy + y) % 256
-	bg_tilemap_addr := get_bg_tilemap_addr(gb, tilemap_x, tilemap_y)
+	bg_tilemap_addr := get_bg_tilemap_addr(gb, x, y)
 	bg_tile_id, bg_tile_props := get_bg_tile(gb, bg_tilemap_addr, tilemap_x, tilemap_y)
 	bg_pixel_color: u8 = 0
 	obj_pixel_color: u8 = 0
@@ -404,10 +404,11 @@ get_bg_tile :: proc(gb: ^GB, tilemap_addr: u16, x: int, y: int) -> (id: u8, prop
 	tilemap_offset := (tile_y * 32) + tile_x
 	tile_addr := tilemap_addr + u16(tilemap_offset)
 
+	// always read tilemap tile IDs from VRAM bank 0
 	id = mem_read(&gb.mem, tile_addr, override_vram_bank = 0)
 
 	if gb.color {
-		// CGB: read BG tile attribute in VRAM bank 1
+		// CGB: read BG tilemap tile attribute in VRAM bank 1
 		props = mem_read(&gb.mem, tile_addr, override_vram_bank = 1)
 	}
 

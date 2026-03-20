@@ -123,7 +123,7 @@ process_debug_inputs :: proc(gb: ^GB, debug_ctx: ^GB_Debug_Context) {
 	}
 
 	if rl.IsKeyPressed(rl.KeyboardKey.D) {
-		dump_memory(gb, 0xD000, 0xDFFF)
+		dump_memory(gb, 0xFF40, 0xFF4F)
 	}
 
 	if rl.IsKeyPressed(rl.KeyboardKey.T) {
@@ -138,7 +138,7 @@ process_debug_inputs :: proc(gb: ^GB, debug_ctx: ^GB_Debug_Context) {
 		debug_ctx.show_tilemap_texture = !debug_ctx.show_tilemap_texture
 
 		if debug_ctx.show_tilemap_texture {
-			update_tilemap_texture(gb, debug_ctx.tilemap_texture.texture)
+			update_tilemap_texture(gb, debug_ctx.tilemap_texture.texture, 0x9C00)
 		}
 	}
 }
