@@ -404,7 +404,7 @@ get_bg_tile :: proc(gb: ^GB, tilemap_addr: u16, x: int, y: int) -> (id: u8, prop
 	tilemap_offset := (tile_y * 32) + tile_x
 	tile_addr := tilemap_addr + u16(tilemap_offset)
 
-	id = mem_read(&gb.mem, tile_addr)
+	id = mem_read(&gb.mem, tile_addr, override_vram_bank = 0)
 
 	if gb.color {
 		// CGB: read BG tile attribute in VRAM bank 1

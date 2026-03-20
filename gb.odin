@@ -250,24 +250,6 @@ gb_boot :: proc(gb: ^GB, boot_rom_path: string) -> GB_Error {
 
 	gb_init_mbc(gb) or_return
 
-	// TODO: can't map ROM 0x100 - .. for CGB boot rom
-	if gb.color {
-		panic("Unsupported")
-	}
-
-	switch gb.rom_header.rom_type {
-	case 0:
-		copy(gb.mem.data[0x100:], gb.mem.rom[0x100:0x8000]) // map the full rom to 0 - 0x7FFF
-	case 0x1:
-		copy(gb.mem.data[0x100:], gb.mem.rom[0x100:0x4000]) // load the first 16kb bank
-	case 0x2:
-		copy(gb.mem.data[0x100:], gb.mem.rom[0x100:0x4000]) // load the first 16kb bank
-	case 0x3:
-		copy(gb.mem.data[0x100:], gb.mem.rom[0x100:0x4000]) // load the first 16kb bank
-	case:
-		return .ROM_Unsupported
-	}
-
 	return .None
 }
 
@@ -329,6 +311,7 @@ load_dmg_boot_rom :: proc(gb: ^GB, rom_path: string) -> GB_Error {
 	}
 
 	copy(gb.mem.data[:], data)
+	copy(gb.mem.data[0x100:], gb.mem.rom[0x100:0x8000])
 
 	return .None
 }
