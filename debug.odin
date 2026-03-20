@@ -133,6 +133,14 @@ process_debug_inputs :: proc(gb: ^GB, debug_ctx: ^GB_Debug_Context) {
 			update_tileset_texture(&gb.ppu, &gb.mem, debug_ctx.tileset_texture.texture)
 		}
 	}
+
+	if rl.IsKeyPressed(rl.KeyboardKey.V) {
+		debug_ctx.show_tilemap_texture = !debug_ctx.show_tilemap_texture
+
+		if debug_ctx.show_tilemap_texture {
+			update_tilemap_texture(gb, debug_ctx.tilemap_texture.texture)
+		}
+	}
 }
 
 process_debugger_inputs :: proc(cpu: ^CPU) {
@@ -184,24 +192,105 @@ update_tileset_texture :: proc(
 	img_data := make([]rl.Color, texture.width * texture.height)
 	defer delete(img_data)
 
+	width := int(texture.width)
+
 	for i := 0; i < Tile_Count; i += 1 {
 		x := (i % Tiles_Per_Row) * 8
 		y := (i / Tiles_Per_Row) * 8
 		tile_addr := addr + u16(i * 16)
 
-		for tile_x := 0; tile_x < 8; tile_x += 1 {
-			for tile_y := 0; tile_y < 8; tile_y += 1 {
-				pixel_color_id := get_pixel_color(ppu, mem, tile_addr, tile_x, tile_y)
-				pixel_color := get_color_from_dmg_palette(ppu, mem, .BGP, pixel_color_id)
-				img_x := x + tile_x
-				img_y := y + tile_y
+		draw_tile_to_texture(ppu, mem, tile_addr, 0, x, y, width, img_data)
+	}
 
-				img_data[img_y * int(texture.width) + img_x] = pixel_color
+	rl.UpdateTexture(texture, raw_data(img_data[:]))
+}
+
+update_tilemap_texture :: proc(gb: ^GB, texture: rl.Texture2D, addr: u16 = 0x9800) {
+	img_data := make([]rl.Color, texture.width * texture.height)
+	defer delete(img_data)
+
+	for x := 0; x < 256; x += 1 {
+		for y := 0; y < 256; y += 1 {
+			tile_id, tile_props := get_bg_tile(gb, addr, x, y)
+			tile_addr := get_tile_addr(&gb.mem, tile_id, is_object = false)
+			x_flip := false
+			y_flip := false
+			bank := 0
+
+			if gb.color {
+				x_flip = get_tile_x_flip(tile_props)
+				y_flip = get_tile_y_flip(tile_props)
+				bank = get_tile_bank(tile_props)
 			}
+
+			color_id := get_pixel_color(
+				&gb.ppu,
+				&gb.mem,
+				tile_addr,
+				x % 8,
+				y % 8,
+				x_flip = x_flip,
+				y_flip = y_flip,
+				bank = bank,
+			)
+
+			pixel_color: rl.Color
+
+			if gb.color {
+				palette := get_tile_color_palette(tile_props)
+				pixel_color = get_color_from_bg_color_palette(&gb.ppu, &gb.mem, palette, color_id)
+			} else {
+				pixel_color = get_color_from_dmg_palette(&gb.ppu, &gb.mem, .BGP, color_id)
+			}
+
+			img_data[y * 256 + x] = pixel_color
 		}
 	}
 
 	rl.UpdateTexture(texture, raw_data(img_data[:]))
+}
+
+draw_tile_to_texture :: proc(
+	ppu: ^PPU,
+	mem: ^GB_Memory,
+	addr: u16,
+	props: u8,
+	x: int,
+	y: int,
+	width: int,
+	pixels: []rl.Color,
+) {
+	for tile_x := 0; tile_x < 8; tile_x += 1 {
+		for tile_y := 0; tile_y < 8; tile_y += 1 {
+			pixel_color := rl.WHITE
+
+			if ppu.color {
+				x_flip := get_tile_x_flip(props)
+				y_flip := get_tile_y_flip(props)
+				bank := get_tile_bank(props)
+				palette := get_tile_color_palette(props)
+				pixel_color_id := get_pixel_color(
+					ppu,
+					mem,
+					addr,
+					tile_x,
+					tile_y,
+					x_flip = x_flip,
+					y_flip = y_flip,
+					bank = bank,
+				)
+				pixel_color = get_color_from_bg_color_palette(ppu, mem, palette, pixel_color_id)
+			} else {
+				pixel_color_id := get_pixel_color(ppu, mem, addr, tile_x, tile_y)
+				pixel_color = get_color_from_dmg_palette(ppu, mem, .BGP, pixel_color_id)
+			}
+
+			img_x := x + tile_x
+			img_y := y + tile_y
+
+			pixels[img_y * width + img_x] = pixel_color
+		}
+	}
 }
 
 create_debug_tileset_texture :: proc() -> rl.RenderTexture2D {
@@ -211,4 +300,35 @@ create_debug_tileset_texture :: proc() -> rl.RenderTexture2D {
 	texture.texture.format = rl.PixelFormat.UNCOMPRESSED_R8G8B8A8
 
 	return texture
+}
+
+create_debug_tilemap_texture :: proc() -> rl.RenderTexture2D {
+	width :: 32 * 8
+	height :: 32 * 8
+	texture := rl.LoadRenderTexture(width, height)
+	texture.texture.format = rl.PixelFormat.UNCOMPRESSED_R8G8B8A8
+
+	return texture
+}
+
+draw_tileset_texture :: proc(debug_ctx: ^GB_Debug_Context) {
+	texture := debug_ctx.tileset_texture.texture
+	aspect_ratio := f32(texture.width) / f32(texture.height)
+	target_rect := rl.Rectangle {
+		0,
+		0,
+		f32(rl.GetScreenHeight()) * aspect_ratio,
+		f32(rl.GetScreenHeight()),
+	}
+	src_rect := rl.Rectangle{0, 0, f32(texture.width), f32(texture.height)}
+
+	rl.DrawTexturePro(texture, src_rect, target_rect, rl.Vector2{0, 0}, 0, rl.WHITE)
+}
+
+draw_tilemap_texture :: proc(debug_ctx: ^GB_Debug_Context) {
+	texture := debug_ctx.tilemap_texture.texture
+	target_rect := rl.Rectangle{0, 0, f32(rl.GetScreenWidth()), f32(rl.GetScreenHeight())}
+	src_rect := rl.Rectangle{0, 0, f32(texture.width), f32(texture.height)}
+
+	rl.DrawTexturePro(texture, src_rect, target_rect, rl.Vector2{0, 0}, 0, rl.WHITE)
 }

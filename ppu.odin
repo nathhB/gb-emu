@@ -232,18 +232,21 @@ draw_pixels_on_update :: proc(gb: ^GB, tick: u64) {
 	}
 
 	y := int(gb.ppu.scanline)
-	pixel_color := get_pixel_color_at(ppu, &gb.mem, x, y)
+	pixel_color := get_pixel_color_at(gb, x, y)
 	framebuffer_offset := y * ScreenWidth + x
 
 	ppu.framebuffer[framebuffer_offset] = pixel_color
 }
 
-get_pixel_color_at :: proc(ppu: ^PPU, mem: ^GB_Memory, x: int, y: int) -> rl.Color {
+get_pixel_color_at :: proc(gb: ^GB, x: int, y: int) -> rl.Color {
+	mem := &gb.mem
+	ppu := &gb.ppu
 	scx := int(mem_read(mem, u16(GB_HardRegister.SCX)))
 	scy := int(mem_read(mem, u16(GB_HardRegister.SCY)))
 	tilemap_x := (scx + x) % 256
 	tilemap_y := (scy + y) % 256
-	bg_tile_id, bg_tile_props := get_bg_tile(mem, tilemap_x, tilemap_y, ppu.color)
+	bg_tilemap_addr := get_bg_tilemap_addr(gb, tilemap_x, tilemap_y)
+	bg_tile_id, bg_tile_props := get_bg_tile(gb, bg_tilemap_addr, tilemap_x, tilemap_y)
 	bg_pixel_color: u8 = 0
 	obj_pixel_color: u8 = 0
 	drawn_obj: PPU_Object
@@ -395,7 +398,24 @@ get_color_from_obj_color_palette :: proc(
 	return rl.Color{r8, g8, b8, 255}
 }
 
-get_bg_tile :: proc(mem: ^GB_Memory, x: int, y: int, color: bool) -> (id: u8, props: u8) {
+get_bg_tile :: proc(gb: ^GB, tilemap_addr: u16, x: int, y: int) -> (id: u8, props: u8) {
+	tile_x := x / 8
+	tile_y := y / 8
+	tilemap_offset := (tile_y * 32) + tile_x
+	tile_addr := tilemap_addr + u16(tilemap_offset)
+
+	id = mem_read(&gb.mem, tile_addr)
+
+	if gb.color {
+		// CGB: read BG tile attribute in VRAM bank 1
+		props = mem_read(&gb.mem, tile_addr, override_vram_bank = 1)
+	}
+
+	return
+}
+
+get_bg_tilemap_addr :: proc(gb: ^GB, x: int, y: int) -> u16 {
+	mem := &gb.mem
 	bg_tilemap_addr: u16 = 0
 	in_window := false
 
@@ -419,19 +439,7 @@ get_bg_tile :: proc(mem: ^GB_Memory, x: int, y: int, color: bool) -> (id: u8, pr
 		bg_tilemap_addr = bg_tilemap ? 0x9C00 : 0x9800
 	}
 
-	tile_x := x / 8
-	tile_y := y / 8
-	tilemap_offset := (tile_y * 32) + tile_x
-	tile_addr := bg_tilemap_addr + u16(tilemap_offset)
-
-	id = mem_read(mem, tile_addr)
-
-	if color {
-		// CGB: read BG tile attribute in VRAM bank 1
-		props = mem_read(mem, tile_addr, override_vram_bank = 1)
-	}
-
-	return
+	return bg_tilemap_addr
 }
 
 get_objects_at_x :: proc(ppu: ^PPU, x: int, res: ^[dynamic]PPU_Object) {
@@ -553,6 +561,7 @@ get_object_pixel_color :: proc(
 		obj_tile_addr := get_tile_addr(mem, tile_id, is_object = true)
 		x_flip := get_tile_x_flip(obj.attrs)
 		y_flip := get_tile_y_flip(obj.attrs)
+		bank := ppu.color ? get_tile_bank(obj.attrs) : 0
 		obj_pixel_color := get_pixel_color(
 			ppu,
 			mem,
@@ -561,6 +570,7 @@ get_object_pixel_color :: proc(
 			y_in_tile,
 			x_flip,
 			y_flip,
+			bank = bank,
 		)
 
 		if obj_pixel_color > 0 {

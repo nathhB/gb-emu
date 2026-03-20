@@ -40,7 +40,9 @@ Input_State :: struct {
 
 GB_Debug_Context :: struct {
 	tileset_texture:      rl.RenderTexture2D,
+	tilemap_texture:      rl.RenderTexture2D,
 	show_tileset_texture: bool,
+	show_tilemap_texture: bool,
 }
 
 GB_Error :: enum u32 {
@@ -135,6 +137,8 @@ gb_run :: proc(gb: ^GB) {
 	debug_ctx := GB_Debug_Context{}
 	debug_ctx.tileset_texture = create_debug_tileset_texture()
 	defer rl.UnloadRenderTexture(debug_ctx.tileset_texture)
+	debug_ctx.tilemap_texture = create_debug_tilemap_texture()
+	defer rl.UnloadRenderTexture(debug_ctx.tilemap_texture)
 
 	screen_texture.texture.format = rl.PixelFormat.UNCOMPRESSED_R8G8B8A8
 
@@ -165,29 +169,9 @@ gb_run :: proc(gb: ^GB) {
 			rl.ClearBackground(rl.LIGHTGRAY)
 
 			if debug_ctx.show_tileset_texture {
-				tileset_texture := debug_ctx.tileset_texture.texture
-				aspect_ratio := f32(tileset_texture.width) / f32(tileset_texture.height)
-				target_rect := rl.Rectangle {
-					0,
-					0,
-					f32(rl.GetScreenHeight()) * aspect_ratio,
-					f32(rl.GetScreenHeight()),
-				}
-				src_rect := rl.Rectangle {
-					0,
-					0,
-					f32(tileset_texture.width),
-					f32(tileset_texture.height),
-				}
-
-				rl.DrawTexturePro(
-					tileset_texture,
-					src_rect,
-					target_rect,
-					rl.Vector2{0, 0},
-					0,
-					rl.WHITE,
-				)
+				draw_tileset_texture(&debug_ctx)
+			} else if debug_ctx.show_tilemap_texture {
+				draw_tilemap_texture(&debug_ctx)
 			} else {
 				target_rect := rl.Rectangle {
 					0,
