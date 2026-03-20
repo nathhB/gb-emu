@@ -24,12 +24,13 @@ main :: proc() {
 
 	gb := GB{}
 
-	gb_init(&gb, opts.color)
-	defer gb_deinit(&gb)
-
+	color := false
 	err: GB_Error
 
-	err = gb_load_rom(&gb, opts.rom)
+	color, err = gb_load_rom(&gb, opts.rom)
+
+	gb_init(&gb, color)
+	defer gb_deinit(&gb)
 
 	if err != .None {
 		log.errorf("Failed to load ROM %w: %w", opts.rom, err)

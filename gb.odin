@@ -25,6 +25,7 @@ GB :: struct {
 	speed:         int,
 	inputs:        Input_State,
 	color:         bool,
+	paused:        bool,
 }
 
 Input_State :: struct {
@@ -197,24 +198,28 @@ gb_run :: proc(gb: ^GB) {
 	}
 }
 
-gb_load_rom :: proc(gb: ^GB, rom_path: string) -> GB_Error {
+gb_load_rom :: proc(gb: ^GB, rom_path: string) -> (color: bool, err: GB_Error) {
 	rom, success := os.read_entire_file(rom_path)
+	err = .None
 
 	if !success {
-		return .ROM_FileError
+		err = .ROM_FileError
+		return
 	}
 
 	gb.rom_header = read_rom_header(rom)
 
 	if (len(rom) != gb.rom_header.rom_size) {
-		return .ROM_InvalidSize
+		err = .ROM_InvalidSize
+		return
 	}
 
 	gb.mem.rom = rom
+	color = rom[0x143] & 0x80 > 0
 
 	print_rom_info(gb.rom_header)
 
-	return .None
+	return
 }
 
 gb_init_mbc :: proc(gb: ^GB) -> GB_Error {
@@ -332,6 +337,10 @@ load_cgb_boot_rom :: proc(gb: ^GB, rom_path: string) -> GB_Error {
 }
 
 do_frame :: proc(gb: ^GB) {
+	if gb.paused {
+		return
+	}
+
 	for f := 0; f < gb.speed; f += 1 {
 		for t: u64 = 0; t < FrameDots; t += 1 {
 			cpu_tick(gb)

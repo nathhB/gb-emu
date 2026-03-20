@@ -122,6 +122,11 @@ process_debug_inputs :: proc(gb: ^GB, debug_ctx: ^GB_Debug_Context) {
 		gb.speed = 1
 	}
 
+
+	if rl.IsKeyPressed(rl.KeyboardKey.P) {
+		gb.paused = !gb.paused
+	}
+
 	if rl.IsKeyPressed(rl.KeyboardKey.D) {
 		dump_memory(gb, 0xFF40, 0xFF4F)
 	}
