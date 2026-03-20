@@ -243,9 +243,11 @@ get_pixel_color_at :: proc(gb: ^GB, x: int, y: int) -> rl.Color {
 	ppu := &gb.ppu
 	scx := int(mem_read(mem, u16(GB_HardRegister.SCX)))
 	scy := int(mem_read(mem, u16(GB_HardRegister.SCY)))
-	tilemap_x := (scx + x) % 256
-	tilemap_y := (scy + y) % 256
-	bg_tilemap_addr := get_bg_tilemap_addr(gb, x, y)
+	wx := int(mem_read(mem, u16(GB_HardRegister.WX))) - 7
+	wy := int(mem_read(mem, u16(GB_HardRegister.WY)))
+	bg_tilemap_addr, window := get_bg_tilemap_addr(gb, x, y, wx, wy)
+	tilemap_x := window ? x - wx : (scx + x) % 256
+	tilemap_y := window ? y - wy : (scy + y) % 256
 	bg_tile_id, bg_tile_props := get_bg_tile(gb, bg_tilemap_addr, tilemap_x, tilemap_y)
 	bg_pixel_color: u8 = 0
 	obj_pixel_color: u8 = 0
@@ -415,32 +417,36 @@ get_bg_tile :: proc(gb: ^GB, tilemap_addr: u16, x: int, y: int) -> (id: u8, prop
 	return
 }
 
-get_bg_tilemap_addr :: proc(gb: ^GB, x: int, y: int) -> u16 {
+get_bg_tilemap_addr :: proc(
+	gb: ^GB,
+	x: int,
+	y: int,
+	wx: int,
+	wy: int,
+) -> (
+	tilemap_addr: u16,
+	window: bool,
+) {
 	mem := &gb.mem
-	bg_tilemap_addr: u16 = 0
-	in_window := false
+	window = false
 
 	if get_control_flag(mem, PPU_Control.Window_Enable) {
-		// https://gbdev.io/pandocs/Scrolling.html#ff4aff4b--wy-wx-window-y-position-x-position-plus-7
-		wx := mem_read(mem, u16(GB_HardRegister.WX))
-		wy := mem_read(mem, u16(GB_HardRegister.WY))
+		// https://gbdev.io/pandocs/Scrolling.html#ff4aff4b--wy-wx-window-y-position-x-position-plus-7	
 
-		wx -= 7
-
-		in_window = x >= int(wx) && y >= int(wy)
+		window = x >= wx && y >= wy
 	}
 
-	if in_window {
+	if window {
 		win_tilemap := get_control_flag(mem, PPU_Control.Window_TileMap)
 
-		bg_tilemap_addr = win_tilemap ? 0x9C00 : 0x9800
+		tilemap_addr = win_tilemap ? 0x9C00 : 0x9800
 	} else {
 		bg_tilemap := get_control_flag(mem, PPU_Control.BG_TileMap)
 
-		bg_tilemap_addr = bg_tilemap ? 0x9C00 : 0x9800
+		tilemap_addr = bg_tilemap ? 0x9C00 : 0x9800
 	}
 
-	return bg_tilemap_addr
+	return
 }
 
 get_objects_at_x :: proc(ppu: ^PPU, x: int, res: ^[dynamic]PPU_Object) {
