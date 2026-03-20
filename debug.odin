@@ -128,6 +128,10 @@ process_debug_inputs :: proc(gb: ^GB, debug_ctx: ^GB_Debug_Context) {
 	}
 
 	if rl.IsKeyPressed(rl.KeyboardKey.D) {
+		debug_ctx.show_debug_info = !debug_ctx.show_debug_info
+	}
+
+	if rl.IsKeyPressed(rl.KeyboardKey.COMMA) {
 		dump_memory(gb, 0xFF40, 0xFF4F)
 	}
 

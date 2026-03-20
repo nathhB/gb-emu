@@ -44,6 +44,7 @@ GB_Debug_Context :: struct {
 	tilemap_texture:      rl.RenderTexture2D,
 	show_tileset_texture: bool,
 	show_tilemap_texture: bool,
+	show_debug_info:      bool,
 }
 
 GB_Error :: enum u32 {
@@ -192,7 +193,10 @@ gb_run :: proc(gb: ^GB) {
 			}
 
 			rl.DrawFPS(0, 0)
-			draw_debugger_info(gb)
+
+			if debug_ctx.show_debug_info {
+				draw_debugger_info(gb)
+			}
 		}
 		rl.EndDrawing()
 	}
