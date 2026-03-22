@@ -68,10 +68,15 @@ main :: proc() {
 	rl.SetConfigFlags({rl.ConfigFlag.WINDOW_HIGHDPI, rl.ConfigFlag.WINDOW_RESIZABLE})
 	rl.InitWindow(640, 480, "GB Emulator")
 
-	bp := proc(gb: ^GB) {
-
-	}
+	// bp := proc(gb: ^GB) {
+	//
+	// }
 	// cpu_add_breakpoint(&gb.cpu, 0x415f, bp)
 
+	mem_load_saved_external_ram(&gb.mem)
 	gb_run(&gb)
+
+	if gb.mem.save_ext_ram {
+		mem_save_external_ram(&gb.mem)
+	}
 }

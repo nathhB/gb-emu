@@ -2,6 +2,7 @@ package gb_emu
 
 import "core:fmt"
 import "core:log"
+import "core:os"
 import rl "vendor:raylib"
 
 VRAM_Bank_Size :: 0x2000 + 1
@@ -27,6 +28,7 @@ GB_Memory :: struct {
 	vram_bank:     int,
 	wram_bank:     int,
 	external_ram:  bool,
+	save_ext_ram:  bool,
 	read:          proc(mem: ^GB_Memory, addr: u16) -> u8,
 	write:         proc(gb: ^GB, addr: u16, byte: u8),
 	oam_transfer:  struct {
@@ -131,6 +133,27 @@ mem_tick :: proc(gb: ^GB) {
 	if gb.mem.oam_transfer.active {
 		do_oam_transfer(gb)
 	}
+}
+
+mem_save_external_ram :: proc(mem: ^GB_Memory) -> GB_Error {
+	fd, err := os.open("foo.sav", os.O_CREATE | os.O_RDWR, 777)
+	defer os.close(fd)
+
+	if err != nil {
+		return .Save_Failed
+	}
+
+	_, err = os.write(fd, mem.data[0xA000:0xC000])
+
+	if err != nil {
+		return .Save_Failed
+	}
+
+	return .None
+}
+
+mem_load_saved_external_ram :: proc(mem: ^GB_Memory) {
+	// TODO:
 }
 
 get_vram_addr :: proc(mem: ^GB_Memory, addr: u16, override_vram_bank := -1) -> u16 {

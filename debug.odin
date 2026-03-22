@@ -43,6 +43,10 @@ print_cpu :: proc(cpu: ^CPU) {
 	)
 }
 
+dump_oam :: proc(gb: ^GB) {
+	dump_memory(gb, 0xFE00, 0xFE9F)
+}
+
 dump_vram :: proc(gb: ^GB) {
 	dump_memory(gb, 0x8000, 0x9FFF)
 }
@@ -133,6 +137,10 @@ process_debug_inputs :: proc(gb: ^GB, debug_ctx: ^GB_Debug_Context) {
 
 	if rl.IsKeyPressed(rl.KeyboardKey.COMMA) {
 		dump_memory(gb, 0xFF40, 0xFF4F)
+	}
+
+	if rl.IsKeyPressed(rl.KeyboardKey.O) {
+		dump_oam(gb)
 	}
 
 	if rl.IsKeyPressed(rl.KeyboardKey.T) {

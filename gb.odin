@@ -55,6 +55,7 @@ GB_Error :: enum u32 {
 	ROM_Unsupported,
 	ROM_FailedToLoadBoot,
 	MBC_Unsupported,
+	Save_Failed,
 }
 
 ROM_Header :: struct {
@@ -238,6 +239,7 @@ gb_init_mbc :: proc(gb: ^GB) -> GB_Error {
 		mbc1_init(&gb.mem, true)
 		log.info("Memory controller: MBC1+RAM")
 	case 0x3:
+		gb.mem.save_ext_ram = true
 		mbc1_init(&gb.mem, true)
 		log.info("Memory controller: MBC1+RAM+BATTERY")
 	case:
