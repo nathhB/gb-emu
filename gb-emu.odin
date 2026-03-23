@@ -68,15 +68,19 @@ main :: proc() {
 	rl.SetConfigFlags({rl.ConfigFlag.WINDOW_HIGHDPI, rl.ConfigFlag.WINDOW_RESIZABLE})
 	rl.InitWindow(640, 480, "GB Emulator")
 
-	// bp := proc(gb: ^GB) {
-	//
-	// }
-	// cpu_add_breakpoint(&gb.cpu, 0x415f, bp)
+	err = mem_load_saved_external_ram(&gb.mem)
 
-	mem_load_saved_external_ram(&gb.mem)
+	if err != nil {
+		log.error("Failed to load external RAM")
+	}
+
 	gb_run(&gb)
 
 	if gb.mem.save_ext_ram {
-		mem_save_external_ram(&gb.mem)
+		err := mem_save_external_ram(&gb.mem)
+
+		if err != nil {
+			log.errorf("Failed to save external RAM")
+		}
 	}
 }

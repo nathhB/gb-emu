@@ -56,6 +56,7 @@ GB_Error :: enum u32 {
 	ROM_FailedToLoadBoot,
 	MBC_Unsupported,
 	Save_Failed,
+	Load_Failed,
 }
 
 ROM_Header :: struct {
@@ -118,12 +119,12 @@ GB_Audio_Registers :: enum u16 {
 	NR52 = 0xFF26, // Audio master control
 }
 
-gb_init :: proc(gb: ^GB, color: bool) {
+gb_init :: proc(gb: ^GB, color: bool, external_ram := 0) {
 	log.debugf("CGB mode: %w", color)
 
 	gb.color = color
 
-	mem_init(&gb.mem, color)
+	mem_init(&gb.mem, color, gb.rom_header.ram_size)
 	cpu_init(&gb.cpu)
 	ppu_init(&gb.ppu, &gb.mem, color)
 	apu_init(&gb.apu)
@@ -233,14 +234,14 @@ gb_init_mbc :: proc(gb: ^GB) -> GB_Error {
 		mbc0_init(&gb.mem)
 		log.info("Memory controller: none")
 	case 0x1:
-		mbc1_init(&gb.mem, false)
+		mbc1_init(&gb.mem)
 		log.info("Memory controller: MBC1")
 	case 0x2:
-		mbc1_init(&gb.mem, true)
+		mbc1_init(&gb.mem)
 		log.info("Memory controller: MBC1+RAM")
 	case 0x3:
 		gb.mem.save_ext_ram = true
-		mbc1_init(&gb.mem, true)
+		mbc1_init(&gb.mem)
 		log.info("Memory controller: MBC1+RAM+BATTERY")
 	case:
 		return .MBC_Unsupported
@@ -378,23 +379,27 @@ read_rom_header :: proc(rom: []u8) -> ROM_Header {
 	rom_size := int(32 * (1 << rom[0x148])) * 1024
 	rom_type := rom[0x147]
 	ram_size_type := rom[0x149]
-	ram_size := 0
+	ram_banks := 0
 
+	// https://gbdev.io/pandocs/The_Cartridge_Header.html#0149--ram-size
 	if ram_size_type == 0 {
-		ram_size = 0
-	} else if ram_size == 1 {
-		ram_size = 2 * 1024
-	} else if ram_size == 2 {
-		ram_size = 8 * 1024
-	} else if ram_size == 3 {
-		ram_size = 32 * 1024
+		ram_banks = 0
+	} else if ram_size_type == 2 {
+		ram_banks = 1
+	} else if ram_size_type == 3 {
+		ram_banks = 4
+	} else if ram_size_type == 4 {
+		ram_banks = 16
+	} else if ram_size_type == 5 {
+		ram_banks = 8
 	}
 
+	ram_size := ram_banks * 8192
 	return (ROM_Header){rom_type, rom_size, ram_size}
 }
 
 print_rom_info :: proc(header: ROM_Header) {
 	log.infof("ROM Type: 0x%x", header.rom_type)
 	log.infof("ROM Size (Kb): %d", header.rom_size / 1024)
-	log.infof("RAM Size (Kb): %d", header.ram_size)
+	log.infof("RAM Size (Kb): %d", header.ram_size / 1024)
 }

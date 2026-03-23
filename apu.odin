@@ -118,18 +118,18 @@ apu_write_register :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 	if reg == .NR52 {
 		write_to_master_control(gb, byte)
 	} else if reg == .NR51 {
-		// log.debugf("Writing to sound panning %w register: 0x%x", reg, byte)
+		// apu_log_debug("Writing to sound panning %w register: 0x%x", reg, byte)
 
 		write_to_panning(gb, byte)
 	} else if reg == .NR50 {
-		log.debugf("Writing to master volume %w register: 0x%x", reg, byte)
+		apu_log_debug("Writing to master volume %w register: 0x%x", reg, byte)
 
 		write_to_master_volume(gb, byte)
 	} else if reg >= .NR10 && reg <= .NR14 {
-		log.debugf("Writing to APU channel 1's %w register: 0x%x", reg, byte)
+		apu_log_debug("Writing to APU channel 1's %w register: 0x%x", reg, byte)
 		write_to_channel1(gb, reg, byte)
 	} else if reg >= .NR21 && reg <= .NR24 {
-		log.debugf("Writing to APU channel 2's %w register: 0x%x", reg, byte)
+		apu_log_debug("Writing to APU channel 2's %w register: 0x%x", reg, byte)
 		write_to_channel2(gb, reg, byte)
 	}
 }
@@ -237,9 +237,9 @@ write_to_master_control :: proc(gb: ^GB, byte: u8) {
 	gb.mem.write(gb, u16(GB_Audio_Registers.NR52), (byte & 0x80) | (nr52 & 0x7F))
 
 	if gb.apu.enabled {
-		log.debug("APU enabled")
+		apu_log_debug("APU enabled")
 	} else {
-		log.debug("APU disabled")
+		apu_log_debug("APU disabled")
 		clear_audio_registers(gb)
 		report_channel_status(gb, 1, false)
 		report_channel_status(gb, 2, false)
@@ -284,7 +284,7 @@ write_to_channel1 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 		channel.init_expire_timer = byte & 0x1F
 		channel.wave_duty = byte & 0xC0 >> 6
 
-		log.debugf(
+		apu_log_debug(
 			"Channel 1 init expire timer & wave duty: expire timer = %x, wave duty = %x",
 			channel.init_expire_timer,
 			channel.wave_duty,
@@ -294,7 +294,7 @@ write_to_channel1 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 		channel.env_dir = (byte & 0x8) > 0 ? 1 : 0
 		channel.sweep_pace = byte & 0x7
 
-		log.debugf(
+		apu_log_debug(
 			"Channel 1 volume & envelope (v: %x): init volume = %d, env dir = %x, sweep pace = %x",
 			byte,
 			channel.init_volume,
@@ -305,9 +305,9 @@ write_to_channel1 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 		dac_enabled := channel.init_volume > 0 || channel.env_dir > 0
 
 		if !dac.enabled && dac_enabled {
-			log.debug("DAC 1 enabled")
+			apu_log_debug("DAC 1 enabled")
 		} else if dac.enabled && !dac_enabled {
-			log.debug("DAC 1 disabled, disabling channel 2")
+			apu_log_debug("DAC 1 disabled, disabling channel 2")
 			channel.enabled = false
 			channel.acc_frame_value = 0
 			report_channel_status(gb, 1, false)
@@ -315,19 +315,19 @@ write_to_channel1 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 
 		dac.enabled = dac_enabled
 	} else if reg == .NR13 {
-		log.debugf("Channel 1 period low: %x", byte)
+		apu_log_debug("Channel 1 period low: %x", byte)
 	} else if reg == .NR14 {
-		log.debugf("Channel 1 period high: %x", byte & 0x07)
+		apu_log_debug("Channel 1 period high: %x", byte & 0x07)
 
 		if dac.enabled && (byte & 0x80 > 0) {
-			log.debug("Channel 1 triggered")
+			apu_log_debug("Channel 1 triggered")
 
 			nrx3 := read_audio_register(gb, .NR13)
 			period_value := read_period_value(gb, nrx3, byte)
 			tone_freq := compute_tone_freq(period_value)
 
 			if tone_freq != channel.tone_freq {
-				log.debugf(
+				apu_log_debug(
 					"Channel 1 tone frequency: %d Hz (period value: 0x%x)",
 					tone_freq,
 					period_value,
@@ -350,7 +350,7 @@ write_to_channel1 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 
 		channel.expire_enabled = byte & 0x40 > 0
 
-		log.debugf(
+		apu_log_debug(
 			"Channel 1 control: length enabled = %w, period timer = %x",
 			channel.expire_enabled,
 			channel.period_timer,
@@ -367,7 +367,7 @@ read_period_sweep_register :: proc(gb: ^GB, channel: ^Square_Channel) {
 	channel.period_sweep_dir = (nr10 & 0b00001000) >> 3
 	channel.period_sweep_step = nr10 & 0b00000111
 
-	log.debugf(
+	apu_log_debug(
 		"Channel 1 period sweep: pace = %d, dir = %d, step = %d",
 		channel.period_sweep_pace,
 		channel.period_sweep_dir,
@@ -384,7 +384,7 @@ write_to_channel2 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 		channel.init_expire_timer = byte & 0x1F
 		channel.wave_duty = byte & 0xC0 >> 6
 
-		log.debugf(
+		apu_log_debug(
 			"Channel 2 init expire timer & wave duty: expire timer = %x, wave duty = %x",
 			channel.init_expire_timer,
 			channel.wave_duty,
@@ -394,7 +394,7 @@ write_to_channel2 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 		channel.env_dir = (byte & 0x8) > 0 ? 1 : 0
 		channel.sweep_pace = byte & 0x7
 
-		log.debugf(
+		apu_log_debug(
 			"Channel 2 volume & envelope (v: %x): init volume = %d, env dir = %x, sweep pace = %x",
 			byte,
 			channel.init_volume,
@@ -405,9 +405,9 @@ write_to_channel2 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 		dac_enabled := channel.init_volume > 0 || channel.env_dir > 0
 
 		if !dac.enabled && dac_enabled {
-			log.debug("DAC 2 enabled")
+			apu_log_debug("DAC 2 enabled")
 		} else if dac.enabled && !dac_enabled {
-			log.debug("DAC 2 disabled, disabling channel 2")
+			apu_log_debug("DAC 2 disabled, disabling channel 2")
 			channel.enabled = false
 			channel.acc_frame_value = 0
 			report_channel_status(gb, 2, false)
@@ -415,19 +415,19 @@ write_to_channel2 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 
 		dac.enabled = dac_enabled
 	} else if reg == .NR23 {
-		log.debugf("Channel 2 period low: %x", byte)
+		apu_log_debug("Channel 2 period low: %x", byte)
 	} else if reg == .NR24 {
-		log.debugf("Channel 2 period high: %x", byte & 0x07)
+		apu_log_debug("Channel 2 period high: %x", byte & 0x07)
 
 		if dac.enabled && (byte & 0x80 > 0) {
-			log.debug("Channel 2 triggered")
+			apu_log_debug("Channel 2 triggered")
 
 			nrx3 := read_audio_register(gb, .NR23)
 			period_value := read_period_value(gb, nrx3, byte)
 			tone_freq := compute_tone_freq(period_value)
 
 			if tone_freq != channel.tone_freq {
-				log.debugf(
+				apu_log_debug(
 					"Channel 2 tone frequency: %d Hz (period value: 0x%x)",
 					tone_freq,
 					period_value,
@@ -449,7 +449,7 @@ write_to_channel2 :: proc(gb: ^GB, reg: GB_Audio_Registers, byte: u8) {
 
 		channel.expire_enabled = byte & 0x40 > 0
 
-		log.debugf(
+		apu_log_debug(
 			"Channel 2 control: length enabled = %w, period timer = %x",
 			channel.expire_enabled,
 			channel.period_timer,
@@ -484,7 +484,7 @@ channel1_tick :: proc(gb: ^GB) {
 		tone_freq := compute_tone_freq(period_value)
 
 		if tone_freq != channel.tone_freq {
-			log.debugf(
+			apu_log_debug(
 				"Channel 1 tone frequency: %d Hz (period value: 0x%x)",
 				tone_freq,
 				period_value,
@@ -516,7 +516,7 @@ channel2_tick :: proc(gb: ^GB) {
 		tone_freq := compute_tone_freq(period_value)
 
 		if tone_freq != channel.tone_freq {
-			log.debugf(
+			apu_log_debug(
 				"Channel 2 tone frequency: %d Hz (period value: 0x%x)",
 				tone_freq,
 				period_value,
@@ -568,7 +568,7 @@ channel1_expire_tick :: proc(gb: ^GB) {
 		channel.expire_timer -= 1
 
 		if channel.expire_timer == 0 {
-			log.debug("Channel 1 expired")
+			apu_log_debug("Channel 1 expired")
 
 			channel.enabled = false
 			channel.acc_frame_value = 0
@@ -606,7 +606,7 @@ channel2_expire_tick :: proc(gb: ^GB) {
 		channel.expire_timer -= 1
 
 		if channel.expire_timer == 0 {
-			log.debug("Channel 2 expired")
+			apu_log_debug("Channel 2 expired")
 
 			channel.enabled = false
 			channel.acc_frame_value = 0
@@ -653,4 +653,9 @@ write_to_audio_buffer :: proc(apu: ^APU, left_value, right_value: f32) {
 
 	apu.buffer.frames[apu.buffer.write_index] = frame
 	apu.buffer.write_index = (apu.buffer.write_index + 1) % len(apu.buffer.frames)
+}
+
+@(disabled = true)
+apu_log_debug :: proc(fmt_str: string, args: ..any, location := #caller_location) {
+	log.debugf(fmt_str, args, location)
 }

@@ -3,12 +3,12 @@ package gb_emu
 import "core:fmt"
 import "core:log"
 import "core:os"
-import rl "vendor:raylib"
 
-VRAM_Bank_Size :: 0x2000 + 1
+VRAM_Bank_Size :: 0x2000
 VRAM_Size :: VRAM_Bank_Size * 2
-WRAM_Bank_Size :: 0xFFF + 1
+WRAM_Bank_Size :: 0x1000
 WRAM_Size :: WRAM_Bank_Size * 7
+Ext_RAM_Bank_Size :: 0x2000
 
 GB_Memory :: struct {
 	vram_banking:  bool, // CGB
@@ -17,6 +17,7 @@ GB_Memory :: struct {
 	rom:           []u8,
 	vram:          [VRAM_Size]u8,
 	wram:          [WRAM_Size]u8,
+	ext_ram:       []u8,
 	bg_palettes:   [64]u8, // CGB: background palettes RAM
 	obj_palettes:  [64]u8, // CGB: object palettes RAM
 	bgp_addr:      u8, // CGB
@@ -24,10 +25,9 @@ GB_Memory :: struct {
 	obp_addr:      u8, // CGB
 	obp_auto_incr: bool, // CGB
 	rom_bank:      int,
-	ram_bank:      int,
+	ext_ram_bank:  int,
 	vram_bank:     int,
 	wram_bank:     int,
-	external_ram:  bool,
 	save_ext_ram:  bool,
 	read:          proc(mem: ^GB_Memory, addr: u16) -> u8,
 	write:         proc(gb: ^GB, addr: u16, byte: u8),
@@ -51,7 +51,7 @@ HDMA_Mode :: enum {
 	HBlank,
 }
 
-mem_init :: proc(mem: ^GB_Memory, color: bool) {
+mem_init :: proc(mem: ^GB_Memory, color: bool, external_ram := 0) {
 	mem.data[GB_HardRegister.JOYPAD] = 0xFF
 
 	if color {
@@ -60,6 +60,10 @@ mem_init :: proc(mem: ^GB_Memory, color: bool) {
 	}
 
 	mem.hdma_transfer.status = 0xFF
+
+	if external_ram > 0 {
+		mem.ext_ram = make([]u8, external_ram)
+	}
 }
 
 mem_write :: proc(gb: ^GB, addr: u16, byte: u8) {
@@ -68,6 +72,14 @@ mem_write :: proc(gb: ^GB, addr: u16, byte: u8) {
 			vram_addr := get_vram_addr(&gb.mem, addr)
 
 			gb.mem.vram[vram_addr] = byte
+		} else {
+			gb.mem.write(gb, addr, byte)
+		}
+	} else if addr >= 0xA000 && addr <= 0xBFFF {
+		if gb.mem.ext_ram != nil {
+			ext_ram_addr := get_ext_ram_addr(&gb.mem, addr)
+
+			gb.mem.ext_ram[ext_ram_addr] = byte
 		} else {
 			gb.mem.write(gb, addr, byte)
 		}
@@ -100,6 +112,12 @@ mem_read :: proc(mem: ^GB_Memory, addr: u16, override_vram_bank := -1) -> u8 {
 
 			return mem.vram[vram_addr]
 		}
+	} else if addr >= 0xA000 && addr <= 0xBFFF {
+		if mem.ext_ram != nil {
+			ext_ram_addr := get_ext_ram_addr(mem, addr)
+
+			return mem.ext_ram[ext_ram_addr]
+		}
 	} else if addr >= 0xD000 && addr <= 0xDFFF {
 		if mem.wram_banking {
 			wram_addr := get_wram_addr(mem, addr)
@@ -120,6 +138,8 @@ mem_get_ptr :: proc(mem: ^GB_Memory, addr: u16) -> ^u8 {
 		if mem.vram_banking {
 			return &mem.vram[get_vram_addr(mem, addr)]
 		}
+	} else if addr >= 0xA000 && addr <= 0xBFFF {
+		return &mem.ext_ram[get_ext_ram_addr(mem, addr)]
 	} else if addr >= 0xD000 && addr <= 0xDFFF {
 		if mem.wram_banking {
 			return &mem.wram[get_wram_addr(mem, addr)]
@@ -136,24 +156,54 @@ mem_tick :: proc(gb: ^GB) {
 }
 
 mem_save_external_ram :: proc(mem: ^GB_Memory) -> GB_Error {
-	fd, err := os.open("foo.sav", os.O_CREATE | os.O_RDWR, 777)
+	if mem.ext_ram == nil {
+		return .None
+	}
+
+	fd, err := os.open("foo.sav", os.O_RDWR | os.O_CREATE | os.O_TRUNC, os.S_IRUSR | os.S_IWUSR)
 	defer os.close(fd)
 
 	if err != nil {
+		log.errorf("os.open(): %w", err)
 		return .Save_Failed
 	}
 
-	_, err = os.write(fd, mem.data[0xA000:0xC000])
+	start_addr := mem.ext_ram_bank * Ext_RAM_Bank_Size
+	end_addr := start_addr + Ext_RAM_Bank_Size
+
+	_, err = os.write(fd, mem.ext_ram[start_addr:end_addr])
 
 	if err != nil {
+		log.errorf("os.write(): %w", err)
 		return .Save_Failed
 	}
 
 	return .None
 }
 
-mem_load_saved_external_ram :: proc(mem: ^GB_Memory) {
-	// TODO:
+mem_load_saved_external_ram :: proc(mem: ^GB_Memory) -> GB_Error {
+	if mem.ext_ram == nil {
+		return .None
+	}
+
+	data, success := os.read_entire_file("foo.sav")
+
+	if !success {
+		return .Load_Failed
+	}
+
+	// copy saved RAM into all external banks
+
+	banks := len(mem.ext_ram) / Ext_RAM_Bank_Size
+
+	for i := 0; i < banks; i += 1 {
+		start := Ext_RAM_Bank_Size * i
+		end := start + Ext_RAM_Bank_Size
+
+		copy(mem.ext_ram[start:end], data)
+	}
+
+	return .None
 }
 
 get_vram_addr :: proc(mem: ^GB_Memory, addr: u16, override_vram_bank := -1) -> u16 {
@@ -170,6 +220,13 @@ get_wram_addr :: proc(mem: ^GB_Memory, addr: u16) -> u16 {
 	bank_offset := u16(bank * WRAM_Bank_Size)
 
 	return bank_offset + (addr - 0xD000)
+}
+
+get_ext_ram_addr :: proc(mem: ^GB_Memory, addr: u16) -> u16 {
+	bank := mem.ext_ram_bank
+	bank_offset := u16(bank * Ext_RAM_Bank_Size)
+
+	return bank_offset + (addr - 0xA000)
 }
 
 // https://gbdev.io/pandocs/Hardware_Reg_List.html

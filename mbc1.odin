@@ -5,10 +5,9 @@ import "core:log"
 
 // https://gbdev.io/pandocs/MBC1.html
 
-mbc1_init :: proc(mem: ^GB_Memory, external_ram: bool) {
+mbc1_init :: proc(mem: ^GB_Memory) {
 	mem.write = mbc1_write
 	mem.read = mbc1_read
-	mem.external_ram = external_ram
 
 	select_rom_bank(mem, 1)
 	select_ram_bank(mem, 0)
@@ -22,22 +21,18 @@ mbc1_write :: proc(gb: ^GB, addr: u16, byte: u8) {
 		return
 	}
 
-	if addr >= 0xC000 && addr <= 0xCFFF {
-		log.debug("write to WRAM")
-	}
-
 	if addr <= 0x1FFF {
-		enabled := byte == 0x0A
-
-		if !gb.mem.external_ram && enabled {
-			log.debug("Enabled external RAM")
-		}
-
-		if gb.mem.external_ram && !enabled {
-			log.debug("Disabed external RAM")
-		}
-
-		gb.mem.external_ram = enabled
+		// enabled := byte == 0x0A
+		//
+		// if !gb.mem.external_ram && enabled {
+		// 	log.debug("Enabled external RAM")
+		// }
+		//
+		// if gb.mem.external_ram && !enabled {
+		// 	log.debug("Disabed external RAM")
+		// }
+		//
+		// gb.mem.external_ram = enabled
 	} else if addr >= 0x2000 && addr <= 0x3FFF {
 		// writing to ROM bank number register
 		select_rom_bank(&gb.mem, byte)
@@ -66,26 +61,10 @@ select_rom_bank :: proc(mem: ^GB_Memory, byte: u8) {
 }
 
 select_ram_bank :: proc(mem: ^GB_Memory, byte: u8) {
-	mem.ram_bank = int(byte & 0x3)
-	bank_start := 0xA000 + u32(mem.ram_bank * 0x2000)
-	bank_end := bank_start + 0x2000
-
-	copy(mem.data[0xA000:], mem.rom[bank_start:bank_end])
-	// log.debugf("Selected RAM bank: %d", mem.ram_bank)
+	mem.ext_ram_bank = int(byte & 0x3)
+	log.debugf("Selected external RAM bank: %d", mem.ext_ram_bank)
 }
 
 mbc1_read :: proc(mem: ^GB_Memory, addr: u16) -> u8 {
-	if addr <= 0x7FFF {
-		// read from ROM bank
-		return mem.data[addr]
-	} else if addr >= 0xA000 && addr <= 0xBFFF {
-		// read from external RAM if enabled
-		if mem.external_ram {
-			return mem.data[addr]
-		} else {
-			return 0xFF
-		}
-	}
-
 	return mem.data[addr]
 }
